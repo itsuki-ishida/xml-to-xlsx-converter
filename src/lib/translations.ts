@@ -354,3 +354,44 @@ export function translateFieldShort(technicalName: string): string {
  */
 export const TRANSLATION_SOURCE =
   "SAP公式ドキュメント（IDoc Interface / ABAP Data Dictionary）に基づく翻訳";
+
+/**
+ * パース結果に対してSAP翻訳がどの程度適用されたかを分析する
+ */
+export function analyzeTranslationCoverage(
+  sectionNames: string[],
+  fieldNames: string[]
+): {
+  /** SAP形式として認識されたか */
+  isSapDetected: boolean;
+  /** 翻訳済みセクション数 */
+  translatedSections: number;
+  /** 全セクション数 */
+  totalSections: number;
+  /** 翻訳済みフィールド数 */
+  translatedFields: number;
+  /** 全フィールド数 */
+  totalFields: number;
+} {
+  const translatedSections = sectionNames.filter(
+    (name) => name in SECTION_TRANSLATIONS
+  ).length;
+  const translatedFields = fieldNames.filter(
+    (name) => stripFieldPrefix(name) in FIELD_TRANSLATIONS
+  ).length;
+
+  // セクション名またはフィールド名の20%以上が翻訳辞書にヒットすればSAP形式と判定
+  const sectionRate =
+    sectionNames.length > 0 ? translatedSections / sectionNames.length : 0;
+  const fieldRate =
+    fieldNames.length > 0 ? translatedFields / fieldNames.length : 0;
+  const isSapDetected = sectionRate >= 0.2 || fieldRate >= 0.2;
+
+  return {
+    isSapDetected,
+    translatedSections,
+    totalSections: sectionNames.length,
+    translatedFields,
+    totalFields: fieldNames.length,
+  };
+}

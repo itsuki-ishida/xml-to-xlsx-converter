@@ -8,6 +8,7 @@ import {
   translateFieldShort,
   stripFieldPrefix,
   TRANSLATION_SOURCE,
+  analyzeTranslationCoverage,
 } from "@/lib/translations";
 
 interface ConversionResultProps {
@@ -50,9 +51,14 @@ export default function ConversionResult({ result }: ConversionResultProps) {
 
   const effectiveTab = tabs.length === 1 ? tabs[0].key : activeTab;
 
+  // SAP翻訳適用状況を分析
+  const sectionNames = result.sheets.map((s) => s.name);
+  const fieldNames = result.sheets.flatMap((s) => s.headers);
+  const coverage = analyzeTranslationCoverage(sectionNames, fieldNames);
+
   return (
     <div className="space-y-2">
-      {/* XLSX構成情報 + 翻訳出典 */}
+      {/* XLSX構成情報 + 形式検出インジケーター */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
         <span>
           XLSX出力: {summary.sheetCount}シート構成
@@ -61,12 +67,23 @@ export default function ConversionResult({ result }: ConversionResultProps) {
           {summary.detailSections > 0 &&
             ` / 明細 ${summary.detailSections}テーブル (${summary.detailRows}行)`}
         </span>
-        <span className="inline-flex items-center gap-1 text-blue-500">
-          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          {TRANSLATION_SOURCE}
-        </span>
+        {coverage.isSapDetected ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2.5 py-0.5 text-blue-600 border border-blue-200">
+            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            SAP形式を検出 — {TRANSLATION_SOURCE}
+            （{coverage.translatedSections}/{coverage.totalSections}セクション,{" "}
+            {coverage.translatedFields}/{coverage.totalFields}フィールド翻訳済み）
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 rounded-full bg-gray-50 px-2.5 py-0.5 text-gray-500 border border-gray-200">
+            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+            </svg>
+            汎用XMLとして変換（SAP翻訳辞書に該当するフィールドがありません）
+          </span>
+        )}
       </div>
 
       <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
