@@ -171,7 +171,7 @@ export async function generateXlsx(parsed: ParsedXmlResult): Promise<Blob> {
 
   // --- シート2: 明細（小規模テーブル統合） ---
   if (smallMultiSheets.length > 0) {
-    const { aoa, merges, rowMeta, maxCols } =
+    const { aoa, merges, rowMeta, rowCols, maxCols } =
       buildDetailsSheet(smallMultiSheets);
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     const maxDataCols = Math.max(
@@ -183,7 +183,7 @@ export async function generateXlsx(parsed: ParsedXmlResult): Promise<Blob> {
     }
     ws["!cols"] = colWidths;
     if (merges.length > 0) ws["!merges"] = merges;
-    applyDetailStyles(ws, rowMeta, maxCols);
+    applyDetailStyles(ws, rowMeta, rowCols);
     XLSX.utils.book_append_sheet(wb, ws, "明細");
     sheetIndex++;
   }
@@ -191,7 +191,7 @@ export async function generateXlsx(parsed: ParsedXmlResult): Promise<Blob> {
   // --- 個別シート: 大規模テーブル（閾値以上） ---
   const usedSheetNames = new Set(["概要", "明細"]);
   for (const sheet of largeMultiSheets) {
-    const { aoa, merges, rowMeta, maxCols } = buildDetailsSheet([sheet]);
+    const { aoa, merges, rowMeta, rowCols } = buildDetailsSheet([sheet]);
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     const displayHeaders = getDisplayHeaders(sheet);
     const colWidths: XLSX.ColInfo[] = [{ wch: 5 }];
@@ -200,7 +200,7 @@ export async function generateXlsx(parsed: ParsedXmlResult): Promise<Blob> {
     }
     ws["!cols"] = colWidths;
     if (merges.length > 0) ws["!merges"] = merges;
-    applyDetailStyles(ws, rowMeta, maxCols);
+    applyDetailStyles(ws, rowMeta, rowCols);
     const sheetName = makeUniqueSheetName(sheet.name, usedSheetNames);
     usedSheetNames.add(sheetName);
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
@@ -374,11 +374,13 @@ function buildDetailsSheet(sheets: SheetData[]): {
   aoa: string[][];
   merges: XLSX.Range[];
   rowMeta: DetailRowType[];
+  rowCols: number[];
   maxCols: number;
 } {
   const aoa: string[][] = [];
   const merges: XLSX.Range[] = [];
   const rowMeta: DetailRowType[] = [];
+  const rowCols: number[] = [];
   let maxCols = 0;
 
   for (let si = 0; si < sheets.length; si++) {
@@ -387,6 +389,7 @@ function buildDetailsSheet(sheets: SheetData[]): {
     if (si > 0) {
       aoa.push([]);
       rowMeta.push("empty");
+      rowCols.push(0);
     }
 
     const displayHeaders = getDisplayHeaders(sheet);
@@ -402,6 +405,7 @@ function buildDetailsSheet(sheets: SheetData[]): {
         : `■ ${sheet.name} (${sheet.rows.length}件)`;
     aoa.push([sectionLabel, ...Array(displayHeaders.length).fill("")]);
     rowMeta.push("section");
+    rowCols.push(totalCols);
     if (totalCols > 1) {
       merges.push({
         s: { r: sectionRowIdx, c: 0 },
@@ -412,10 +416,12 @@ function buildDetailsSheet(sheets: SheetData[]): {
     // 日本語ヘッダー
     aoa.push(["#", ...displayHeaders.map(translateFieldShort)]);
     rowMeta.push("headerJa");
+    rowCols.push(totalCols);
 
     // 技術名ヘッダー
     aoa.push(["", ...displayHeaders.map(stripFieldPrefix)]);
     rowMeta.push("headerTech");
+    rowCols.push(totalCols);
 
     // データ行
     for (let ri = 0; ri < sheet.rows.length; ri++) {
@@ -425,46 +431,50 @@ function buildDetailsSheet(sheets: SheetData[]): {
         ...displayHeaders.map((h) => row[h] ?? ""),
       ]);
       rowMeta.push(ri % 2 === 0 ? "data" : "dataAlt");
+      rowCols.push(totalCols);
     }
   }
 
   aoa.push([]);
   rowMeta.push("empty");
+  rowCols.push(0);
   aoa.push([`※ ${TRANSLATION_SOURCE}`]);
   rowMeta.push("source");
+  rowCols.push(1);
 
-  return { aoa, merges, rowMeta, maxCols };
+  return { aoa, merges, rowMeta, rowCols, maxCols };
 }
 
 function applyDetailStyles(
   ws: XLSX.WorkSheet,
   rowMeta: DetailRowType[],
-  maxCols: number
+  rowCols: number[]
 ) {
   const rowHeights: XLSX.RowInfo[] = [];
 
   for (let r = 0; r < rowMeta.length; r++) {
+    const cols = rowCols[r] || 0;
     switch (rowMeta[r]) {
       case "section":
-        applyRowStyle(ws, r, maxCols, S.detailSection);
+        applyRowStyle(ws, r, cols, S.detailSection);
         rowHeights[r] = { hpt: 24 };
         break;
       case "headerJa":
-        applyRowStyle(ws, r, maxCols, S.detailHeaderJa);
+        applyRowStyle(ws, r, cols, S.detailHeaderJa);
         rowHeights[r] = { hpt: 20 };
         break;
       case "headerTech":
-        applyRowStyle(ws, r, maxCols, S.detailHeaderTech);
+        applyRowStyle(ws, r, cols, S.detailHeaderTech);
         break;
       case "data":
         applyCellStyle(ws, r, 0, S.detailRowNum);
-        for (let c = 1; c < maxCols; c++) {
+        for (let c = 1; c < cols; c++) {
           applyCellStyle(ws, r, c, S.detailData);
         }
         break;
       case "dataAlt":
         applyCellStyle(ws, r, 0, S.detailRowNumAlt);
-        for (let c = 1; c < maxCols; c++) {
+        for (let c = 1; c < cols; c++) {
           applyCellStyle(ws, r, c, S.detailDataAlt);
         }
         break;
