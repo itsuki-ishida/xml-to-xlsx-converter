@@ -46,12 +46,10 @@ const S = {
     font: { sz: 10 },
     border: BORDER_THIN,
   },
-  /** 明細: セクション見出し（ダークブルー + 白太字） */
+  /** 明細: セクション見出し（黒太字・背景なし） */
   detailSection: {
-    font: { bold: true, color: { rgb: "FFFFFF" }, sz: 11 },
-    fill: { fgColor: { rgb: "2F5496" } },
+    font: { bold: true, sz: 11 },
     border: BORDER_THIN,
-    alignment: { vertical: "center" as const },
   },
   /** 明細: 日本語ヘッダー行（ミディアムブルー + 白太字） */
   detailHeaderJa: {
