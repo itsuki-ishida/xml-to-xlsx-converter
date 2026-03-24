@@ -1,9 +1,8 @@
 /**
- * XLSX生成テスト（2シート構成 + 翻訳機能）
- * - ファイル情報ヘッダー
- * - スマート属性フィルタリング
- * - 明細テーブルに行番号(#)付き
- * - フィールド名・セクション名の翻訳
+ * XLSX生成テスト（バイリンガル対応: 日本語名 + 技術名の両方表示）
+ * - 概要シート: 3列構成（日本語名 / 技術名 / 値）
+ * - 明細シート: セクション見出しセル結合 + 2行ヘッダー（日本語名 + 技術名）
+ * - SAP公式ドキュメント準拠の翻訳
  * - データ完全性の検証
  */
 import { JSDOM } from "jsdom";
@@ -97,7 +96,7 @@ function parseXml(xmlText, fileName) {
   return { fileName, rootElement, sheets };
 }
 
-// === 翻訳辞書（インライン: 本体は src/lib/translations.ts） ===
+// === 翻訳辞書（テスト用インライン: 本体は src/lib/translations.ts） ===
 const SECTION_TRANSLATIONS = {
   EDI_DC40: "IDoc制御情報",
   E1SHP_IBDLV_SAVE_REPLICA: "出荷通知データ",
@@ -126,23 +125,24 @@ const FIELD_TRANSLATIONS = {
   SNDPRN: "送信パートナー", I_VBELN: "伝票番号", I_STATUS: "ステータス",
   I_UTC_TIMESTAMP: "タイムスタンプ(UTC)", NAME: "名前", E_MAIL: "メールアドレス",
   FIELD1: "フィールド1", FIELD2: "フィールド2", FIELD3: "フィールド3", FIELD4: "フィールド4",
+  PLANT: "プラント", STGE_LOC: "保管場所", PROFIT_CTR: "利益センタ",
+  TIMETYPE: "時間タイプ", TIMESTAMP_UTC: "タイムスタンプ(UTC)", TIMEZONE: "タイムゾーン",
 };
 
-function translateSection(name) {
-  const ja = SECTION_TRANSLATIONS[name];
-  return ja ? `${ja} (${name})` : name;
+const TRANSLATION_SOURCE = "SAP公式ドキュメント（IDoc Interface / ABAP Data Dictionary）に基づく翻訳";
+
+function translateSectionShort(name) {
+  return SECTION_TRANSLATIONS[name] ?? name;
 }
-function translateField(name) {
-  const raw = name.startsWith("@") ? name.substring(1) : name;
-  const ja = FIELD_TRANSLATIONS[raw];
-  return ja ? `${ja} (${raw})` : raw;
+function stripFieldPrefix(name) {
+  return name.startsWith("@") ? name.substring(1) : name;
 }
 function translateFieldShort(name) {
-  const raw = name.startsWith("@") ? name.substring(1) : name;
+  const raw = stripFieldPrefix(name);
   return FIELD_TRANSLATIONS[raw] ?? raw;
 }
 
-// === XLSX生成ロジック（翻訳付き） ===
+// === XLSX生成ロジック（バイリンガル対応） ===
 function getDisplayHeaders(sheet) {
   const headers = [];
   for (const h of sheet.headers) {
@@ -160,44 +160,72 @@ function generateXlsxBuffer(parsed) {
   const singleSheets = parsed.sheets.filter((s) => s.rows.length === 1);
   const multiSheets = parsed.sheets.filter((s) => s.rows.length >= 2);
 
-  // シート1: 概要（翻訳付き）
+  // シート1: 概要（3列: 日本語名 / 技術名 / 値）
   if (singleSheets.length > 0) {
-    const aoa = [["セクション / 項目名", "値"]];
-    aoa.push(["■ ファイル情報", ""]);
-    aoa.push(["  ファイル名", parsed.fileName]);
-    aoa.push(["  ルート要素", parsed.rootElement]);
+    const aoa = [["項目名（日本語）", "項目名（技術名）", "値"]];
+    aoa.push(["■ ファイル情報", "", ""]);
+    aoa.push(["  ファイル名", "", parsed.fileName]);
+    aoa.push(["  ルート要素", "", parsed.rootElement]);
     aoa.push([]);
 
     for (let si = 0; si < singleSheets.length; si++) {
       const sheet = singleSheets[si];
       const row = sheet.rows[0];
       const displayHeaders = getDisplayHeaders(sheet);
-      aoa.push([`■ ${translateSection(sheet.name)}`, ""]);
+      aoa.push([`■ ${translateSectionShort(sheet.name)}`, sheet.name, ""]);
       for (const header of displayHeaders) {
-        aoa.push([`  ${translateField(header)}`, row[header] ?? ""]);
+        const raw = stripFieldPrefix(header);
+        const ja = translateFieldShort(header);
+        aoa.push([`  ${ja}`, raw, row[header] ?? ""]);
       }
       if (si < singleSheets.length - 1) aoa.push([]);
     }
+    aoa.push([]);
+    aoa.push([`※ ${TRANSLATION_SOURCE}`, "", ""]);
+
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 36 }, { wch: 55 }];
+    ws["!cols"] = [{ wch: 28 }, { wch: 28 }, { wch: 55 }];
     XLSX.utils.book_append_sheet(wb, ws, "概要");
   }
 
-  // シート2: 明細（翻訳付き）
+  // シート2: 明細（セクション見出しセル結合 + 2行ヘッダー）
   if (multiSheets.length > 0) {
     const aoa = [];
+    const merges = [];
     for (let si = 0; si < multiSheets.length; si++) {
       const sheet = multiSheets[si];
       if (si > 0) aoa.push([]);
       const displayHeaders = getDisplayHeaders(sheet);
-      aoa.push([`■ ${translateSection(sheet.name)} (${sheet.rows.length}件)`, ...Array(displayHeaders.length).fill("")]);
+      const totalCols = 1 + displayHeaders.length;
+
+      // セクションヘッダー（セル結合）
+      const sectionRowIdx = aoa.length;
+      const sectionJa = translateSectionShort(sheet.name);
+      const sectionLabel = sectionJa !== sheet.name
+        ? `■ ${sectionJa} / ${sheet.name} (${sheet.rows.length}件)`
+        : `■ ${sheet.name} (${sheet.rows.length}件)`;
+      aoa.push([sectionLabel, ...Array(displayHeaders.length).fill("")]);
+      if (totalCols > 1) {
+        merges.push({ s: { r: sectionRowIdx, c: 0 }, e: { r: sectionRowIdx, c: totalCols - 1 } });
+      }
+
+      // 列ヘッダー1行目: 日本語名
       aoa.push(["#", ...displayHeaders.map(translateFieldShort)]);
+
+      // 列ヘッダー2行目: 技術名
+      aoa.push(["", ...displayHeaders.map(stripFieldPrefix)]);
+
+      // データ行
       for (let ri = 0; ri < sheet.rows.length; ri++) {
         const row = sheet.rows[ri];
         aoa.push([String(ri + 1), ...displayHeaders.map((h) => row[h] ?? "")]);
       }
     }
+    aoa.push([]);
+    aoa.push([`※ ${TRANSLATION_SOURCE}`]);
+
     const ws = XLSX.utils.aoa_to_sheet(aoa);
+    if (merges.length > 0) ws["!merges"] = merges;
     XLSX.utils.book_append_sheet(wb, ws, "明細");
   }
 
@@ -212,8 +240,8 @@ function assert(condition, message) {
   else { failed++; console.error(`  ❌ ${message}`); }
 }
 
-// テスト1: ASN - 2シート構成 + 翻訳
-console.log("\n📊 テスト1: ASN XML → 翻訳付き2シート構成XLSX");
+// テスト1: ASN - 3列概要 + 2行ヘッダー明細
+console.log("\n📊 テスト1: ASN XML → バイリンガル3列概要 + 2行ヘッダー明細");
 const asnXml = fs.readFileSync(
   path.resolve(__dirname, "../../変換前データ/ASN_1800024221_20190214185557.xml"), "utf-8"
 );
@@ -226,56 +254,88 @@ assert(asnWb.SheetNames[0] === "概要", `シート1=概要`);
 assert(asnWb.SheetNames[1] === "明細", `シート2=明細`);
 
 const overviewData = XLSX.utils.sheet_to_json(asnWb.Sheets["概要"], { header: 1 });
-const overviewText = overviewData.map(r => r[0] || "").join("\n");
+
+// 3列ヘッダー検証
+assert(overviewData[0][0] === "項目名（日本語）", "概要ヘッダー列A = 項目名（日本語）");
+assert(overviewData[0][1] === "項目名（技術名）", "概要ヘッダー列B = 項目名（技術名）");
+assert(overviewData[0][2] === "値", "概要ヘッダー列C = 値");
 
 // ファイル情報
 assert(overviewData[1][0] === "■ ファイル情報", "ファイル情報セクション存在");
-assert(overviewData[2][1] === "ASN_1800024221.xml", "ファイル名正しい");
+assert(overviewData[2][2] === "ASN_1800024221.xml", "ファイル名が値列(C列)にある");
 
-// 翻訳付きセクション名の検証
-assert(overviewText.includes("IDoc制御情報 (EDI_DC40)"), "EDI_DC40が翻訳付きで表示");
-assert(overviewText.includes("配送ヘッダー (E1BPIBDLVHDR)"), "E1BPIBDLVHDRが翻訳付きで表示");
-assert(overviewText.includes("住所情報 (E1BPADR1)"), "E1BPADR1が翻訳付きで表示");
-assert(overviewText.includes("住所詳細 (E1BPADR11)"), "E1BPADR11が翻訳付きで表示");
+// セクション行: 日本語名がA列、技術名がB列
+const sectionRows = overviewData.filter(r => r[0] && String(r[0]).startsWith("■") && r[0] !== "■ ファイル情報");
+assert(sectionRows.length > 0, "セクション行が存在");
 
-// 翻訳付きフィールド名の検証（概要: フル表記）
-const docnumRow = overviewData.find(r => r[0] && r[0].includes("DOCNUM"));
-assert(docnumRow && docnumRow[0].includes("ドキュメント番号"), "DOCNUMが「ドキュメント番号」と翻訳表示");
-assert(docnumRow && docnumRow[1] === "0000000059141367", "DOCNUM値正しい");
+const ediDcSection = sectionRows.find(r => String(r[1]) === "EDI_DC40");
+assert(ediDcSection && String(ediDcSection[0]).includes("IDoc制御情報"), "EDI_DC40: A列=日本語名, B列=技術名");
 
-const nameRow = overviewData.find(r => r[0] && r[0].includes("NAME") && !r[0].includes("TABNAM"));
-assert(nameRow && nameRow[0].includes("名前"), "NAMEが「名前」と翻訳表示");
+const dlvHdrSection = sectionRows.find(r => String(r[1]) === "E1BPIBDLVHDR");
+assert(dlvHdrSection && String(dlvHdrSection[0]).includes("配送ヘッダー"), "E1BPIBDLVHDR: A列=日本語名, B列=技術名");
+
+// フィールド行: 日本語名がA列、技術名がB列、値がC列
+const docnumRow = overviewData.find(r => r[1] === "DOCNUM");
+assert(docnumRow && String(docnumRow[0]).includes("ドキュメント番号"), "DOCNUM: A列=日本語名");
+assert(docnumRow && String(docnumRow[1]) === "DOCNUM", "DOCNUM: B列=技術名");
+assert(docnumRow && String(docnumRow[2]) === "0000000059141367", "DOCNUM: C列=値");
+
+const nameRow = overviewData.find(r => r[1] === "NAME");
+assert(nameRow && String(nameRow[0]).includes("名前"), "NAME: A列=日本語名「名前」");
 
 // @SEGMENT除外の検証
-assert(!overviewText.includes("SEGMENT"), "@SEGMENT除外");
+const segmentRow = overviewData.find(r => r[1] === "SEGMENT" || r[1] === "@SEGMENT");
+assert(!segmentRow, "@SEGMENT除外");
 
-// 明細シートの検証
+// 翻訳出典注記
+const sourceRow = overviewData.find(r => r[0] && String(r[0]).includes("SAP公式ドキュメント"));
+assert(sourceRow, "概要シートに翻訳出典注記あり");
+
+// --- 明細シートの検証 ---
 const detailData = XLSX.utils.sheet_to_json(asnWb.Sheets["明細"], { header: 1 });
-const detailText = detailData.map(r => r[0] || "").join("\n");
 
-// 翻訳付きセクション名（明細）
-assert(detailText.includes("配送明細 (E1BPIBDLVITEM)"), "明細のE1BPIBDLVITEMが翻訳付き");
-assert(detailText.includes("拡張データ (E1BPEXTC)"), "明細のE1BPEXTCが翻訳付き");
-assert(detailText.includes("配送期日 (E1BPDLVDEADLN)"), "明細のE1BPDLVDEADLNが翻訳付き");
+// セクション見出しの検証（日本語名 / 技術名の両方含む）
+const detailText = detailData.map(r => String(r[0] || "")).join("\n");
+assert(detailText.includes("配送明細 / E1BPIBDLVITEM"), "明細セクション見出しに日本語名と技術名の両方");
+assert(detailText.includes("拡張データ / E1BPEXTC"), "拡張データセクション見出しに両名");
+assert(detailText.includes("配送期日 / E1BPDLVDEADLN"), "配送期日セクション見出しに両名");
 
-// 翻訳付き列ヘッダー（明細: 短縮表記）
-const itemHeaderIdx = detailData.findIndex(r => r[0] && String(r[0]).includes("配送明細 (E1BPIBDLVITEM)") && !String(r[0]).includes("ORG"));
+// 2行ヘッダーの検証（日本語名 + 技術名）
+const itemHeaderIdx = detailData.findIndex(r => r[0] && String(r[0]).includes("配送明細 / E1BPIBDLVITEM") && !String(r[0]).includes("ORG"));
 if (itemHeaderIdx >= 0) {
-  const colHeaders = detailData[itemHeaderIdx + 1];
-  assert(colHeaders[0] === "#", "行番号(#)ヘッダー");
-  assert(colHeaders.includes("明細番号"), "ITM_NUMBERが「明細番号」と翻訳表示");
-  assert(colHeaders.includes("品目コード"), "MATERIALが「品目コード」と翻訳表示");
-  assert(colHeaders.includes("品目テキスト"), "SHORT_TEXTが「品目テキスト」と翻訳表示");
-  assert(colHeaders.includes("配送数量"), "DLV_QTYが「配送数量」と翻訳表示");
+  const jaHeaders = detailData[itemHeaderIdx + 1];  // 日本語名行
+  const enHeaders = detailData[itemHeaderIdx + 2];  // 技術名行
 
-  // データ値は翻訳されない（元の値のまま）
-  const row1 = detailData[itemHeaderIdx + 2];
-  const itmIdx = colHeaders.indexOf("明細番号");
+  // 日本語名ヘッダー
+  assert(jaHeaders[0] === "#", "行番号(#)ヘッダー");
+  assert(jaHeaders.includes("明細番号"), "日本語ヘッダーに「明細番号」");
+  assert(jaHeaders.includes("品目コード"), "日本語ヘッダーに「品目コード」");
+  assert(jaHeaders.includes("品目テキスト"), "日本語ヘッダーに「品目テキスト」");
+  assert(jaHeaders.includes("配送数量"), "日本語ヘッダーに「配送数量」");
+
+  // 技術名ヘッダー
+  assert(enHeaders.includes("ITM_NUMBER"), "技術名ヘッダーに「ITM_NUMBER」");
+  assert(enHeaders.includes("MATERIAL"), "技術名ヘッダーに「MATERIAL」");
+  assert(enHeaders.includes("SHORT_TEXT"), "技術名ヘッダーに「SHORT_TEXT」");
+  assert(enHeaders.includes("DLV_QTY"), "技術名ヘッダーに「DLV_QTY」");
+
+  // データ行（ヘッダー2行の後）
+  const row1 = detailData[itemHeaderIdx + 3];
+  assert(String(row1[0]) === "1", "データ行の行番号 = 1");
+  const itmIdx = jaHeaders.indexOf("明細番号");
   assert(String(row1[itmIdx]) === "000010", "データ値は翻訳されない (000010)");
 }
 
-// テスト2: OBDS - 翻訳付き
-console.log("\n📊 テスト2: OBDS XML → 翻訳付き概要シート");
+// セル結合の検証
+const detailWs = asnWb.Sheets["明細"];
+assert(detailWs["!merges"] && detailWs["!merges"].length > 0, "明細シートにセル結合あり");
+
+// 明細の翻訳出典
+const detailSourceRow = detailData.find(r => r[0] && String(r[0]).includes("SAP公式ドキュメント"));
+assert(detailSourceRow, "明細シートに翻訳出典注記あり");
+
+// テスト2: OBDS - 3列概要
+console.log("\n📊 テスト2: OBDS XML → バイリンガル3列概要シート");
 const obdsXml = fs.readFileSync(
   path.resolve(__dirname, "../../変換前データ/OBDS_8000580368_20180426103512.xml"), "utf-8"
 );
@@ -285,16 +345,23 @@ const obdsWb = XLSX.read(obdsBuffer, { type: "buffer" });
 
 assert(obdsWb.SheetNames.length === 1, `OBDSは1シート`);
 const obdsOverview = XLSX.utils.sheet_to_json(obdsWb.Sheets["概要"], { header: 1 });
-const obdsText = obdsOverview.map(r => r[0] || "").join("\n");
 
-assert(obdsText.includes("レコードセット (RecordSet)"), "RecordSetが翻訳付き");
-assert(obdsText.includes("ルーティング情報 (FMS_ROUTING)"), "FMS_ROUTINGが翻訳付き");
+// 3列構成の検証
+assert(obdsOverview[0][0] === "項目名（日本語）", "OBDS概要ヘッダーA列");
+assert(obdsOverview[0][1] === "項目名（技術名）", "OBDS概要ヘッダーB列");
+assert(obdsOverview[0][2] === "値", "OBDS概要ヘッダーC列");
 
-const vbelnRow = obdsOverview.find(r => r[0] && r[0].includes("I_VBELN"));
-assert(vbelnRow && vbelnRow[0].includes("伝票番号"), "I_VBELNが「伝票番号」と翻訳表示");
-assert(vbelnRow && String(vbelnRow[1]) === "8000580368", "I_VBELN値正しい");
+const rsSection = obdsOverview.find(r => r[1] === "RecordSet");
+assert(rsSection && String(rsSection[0]).includes("レコードセット"), "RecordSetのA列に日本語名");
 
-// テスト3: 翻訳なしの汎用XML → 元の名前がそのまま表示
+const routingSection = obdsOverview.find(r => r[1] === "FMS_ROUTING");
+assert(routingSection && String(routingSection[0]).includes("ルーティング情報"), "FMS_ROUTINGのA列に日本語名");
+
+const vbelnRow = obdsOverview.find(r => r[1] === "I_VBELN");
+assert(vbelnRow && String(vbelnRow[0]).includes("伝票番号"), "I_VBELNのA列=「伝票番号」");
+assert(vbelnRow && String(vbelnRow[2]) === "8000580368", "I_VBELNのC列=値");
+
+// テスト3: 翻訳なしの汎用XML
 console.log("\n📊 テスト3: 汎用XML → 翻訳なしで元の名前表示");
 const genericXml = `<?xml version="1.0"?>
 <root>
@@ -306,13 +373,18 @@ const genericBuffer = generateXlsxBuffer(genericParsed);
 const genericWb = XLSX.read(genericBuffer, { type: "buffer" });
 
 const genericDetail = XLSX.utils.sheet_to_json(genericWb.Sheets["明細"], { header: 1 });
-// 翻訳辞書にない "product" はそのまま表示
-assert(genericDetail[0][0].includes("product"), "翻訳なし: セクション名はそのまま");
-const genericHeaders = genericDetail[1];
-assert(genericHeaders.includes("sku"), "翻訳なし: skuはそのまま");
-assert(genericHeaders.includes("price"), "翻訳なし: priceはそのまま");
-// データ値もそのまま
-assert(genericDetail[2][1] === "ABC-123", "翻訳なし: データ値そのまま");
+// セクション見出し: 翻訳なしなので技術名のみ
+assert(String(genericDetail[0][0]).includes("product"), "翻訳なし: セクション名はそのまま");
+// 日本語ヘッダー行 = 技術名（翻訳がないため）
+const genericJaHeaders = genericDetail[1];
+assert(genericJaHeaders.includes("sku"), "翻訳なし: skuはそのまま");
+assert(genericJaHeaders.includes("price"), "翻訳なし: priceはそのまま");
+// 技術名ヘッダー行
+const genericEnHeaders = genericDetail[2];
+assert(genericEnHeaders.includes("sku"), "技術名行にskuあり");
+assert(genericEnHeaders.includes("price"), "技術名行にpriceあり");
+// データ値
+assert(genericDetail[3][1] === "ABC-123", "翻訳なし: データ値そのまま");
 
 // テスト4: スマート属性フィルタリング
 console.log("\n📊 テスト4: スマート属性フィルタリング");
@@ -325,15 +397,16 @@ const attrParsed = parseXml(attrXml, "attr.xml");
 const attrBuffer = generateXlsxBuffer(attrParsed);
 const attrWb = XLSX.read(attrBuffer, { type: "buffer" });
 const attrDetail = XLSX.utils.sheet_to_json(attrWb.Sheets["明細"], { header: 1 });
-const attrHeaders = attrDetail[1];
-assert(attrHeaders.includes("status"), "値バラバラの@statusは保持");
-assert(!attrHeaders.includes("type") && !attrHeaders.includes("@type"), "全行同値の@typeは除外");
+const attrJaHeaders = attrDetail[1];
+assert(attrJaHeaders.includes("status"), "値バラバラの@statusは保持");
+assert(!attrJaHeaders.includes("type") && !attrJaHeaders.includes("@type"), "全行同値の@typeは除外");
 
 // テスト5: データ完全性
 console.log("\n📊 テスト5: ASNデータ完全性");
 const allValues = new Set();
 for (const row of overviewData) {
-  if (row[1] !== undefined && row[1] !== "") allValues.add(String(row[1]));
+  // C列（値列）をチェック
+  if (row[2] !== undefined && row[2] !== "") allValues.add(String(row[2]));
 }
 for (const row of detailData) {
   for (let i = 1; i < (row.length || 0); i++) {
@@ -353,8 +426,8 @@ assert(allValues.has("WALT TECHNOLOGY GROUP CO.,LTD."), "NAME値");
 console.log("\n📊 テスト6: ファイル書き出し");
 const outputDir = path.resolve(__dirname, "output");
 if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-fs.writeFileSync(path.join(outputDir, "ASN_2sheet.xlsx"), asnBuffer);
-fs.writeFileSync(path.join(outputDir, "OBDS_2sheet.xlsx"), obdsBuffer);
+fs.writeFileSync(path.join(outputDir, "ASN_bilingual.xlsx"), asnBuffer);
+fs.writeFileSync(path.join(outputDir, "OBDS_bilingual.xlsx"), obdsBuffer);
 assert(true, "XLSXファイル出力済み");
 
 // 結果

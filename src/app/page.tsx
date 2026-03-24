@@ -130,7 +130,7 @@ export default function Home() {
                 XML → XLSX Converter
               </h1>
               <p className="text-sm text-gray-500">
-                XMLファイルをExcel形式に厳密に変換
+                XMLファイルをExcel形式に厳密に変換（SAP公式ドキュメント準拠の翻訳付き）
               </p>
             </div>
           </div>
@@ -261,8 +261,9 @@ export default function Home() {
       </main>
 
       {/* フッター */}
-      <footer className="border-t border-gray-200 bg-white/50 py-4 text-center text-xs text-gray-400">
-        XML → XLSX Converter — ブラウザ上で厳密に変換。データは外部に送信されません。
+      <footer className="border-t border-gray-200 bg-white/50 py-4 text-center text-xs text-gray-400 space-y-1">
+        <p>XML → XLSX Converter — ブラウザ上で厳密に変換。データは外部に送信されません。</p>
+        <p>フィールド名の翻訳はSAP公式ドキュメント（IDoc Interface / ABAP Data Dictionary / SAP Help Portal）に基づいています。</p>
       </footer>
     </div>
   );

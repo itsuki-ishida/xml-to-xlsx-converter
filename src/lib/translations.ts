@@ -1,11 +1,17 @@
 /**
  * XML要素名・フィールド名の翻訳辞書
  *
- * SAP IDoc形式をはじめとする業務XMLのフィールド名を
+ * SAP公式ドキュメント（IDoc Interface / ABAP Data Dictionary / SAP Help Portal）に
+ * 基づいて、SAP IDoc形式をはじめとする業務XMLのフィールド名を
  * 非エンジニアにも理解できる日本語ラベルに翻訳する。
  *
  * 翻訳が存在しないフィールドは元の技術名をそのまま表示する。
  * 汎用XMLへの影響はなく、翻訳は純粋な「上乗せ」機能。
+ *
+ * 参照元:
+ *  - SAP Help Portal: IDoc Interface (https://help.sap.com)
+ *  - SAP ABAP Data Dictionary (トランザクション SE11)
+ *  - SAP Note & Field Documentation
  */
 
 // ─── セクション（要素）名の翻訳 ─────────────────────────────
@@ -295,7 +301,16 @@ const FIELD_TRANSLATIONS: Record<string, string> = {
 // ─── 翻訳ヘルパー関数 ────────────────────────────────────────
 
 /**
- * セクション名を翻訳する
+ * フィールド名から @プレフィックスを除去して技術名を返す
+ */
+export function stripFieldPrefix(technicalName: string): string {
+  return technicalName.startsWith("@")
+    ? technicalName.substring(1)
+    : technicalName;
+}
+
+/**
+ * セクション名を翻訳する（フル表記）
  * 翻訳あり → "翻訳名 (技術名)"
  * 翻訳なし → "技術名"
  */
@@ -305,27 +320,37 @@ export function translateSection(technicalName: string): string {
 }
 
 /**
+ * セクション名を翻訳する（日本語名のみ）
+ * 翻訳あり → "翻訳名"
+ * 翻訳なし → "技術名"
+ */
+export function translateSectionShort(technicalName: string): string {
+  return SECTION_TRANSLATIONS[technicalName] ?? technicalName;
+}
+
+/**
  * フィールド名を翻訳する（概要シート用: フル表記）
  * 翻訳あり → "翻訳名 (技術名)"
  * 翻訳なし → "技術名"
  */
 export function translateField(technicalName: string): string {
-  // @プレフィックスの処理
-  const raw = technicalName.startsWith("@")
-    ? technicalName.substring(1)
-    : technicalName;
+  const raw = stripFieldPrefix(technicalName);
   const ja = FIELD_TRANSLATIONS[raw];
   return ja ? `${ja} (${raw})` : raw;
 }
 
 /**
- * フィールド名を翻訳する（明細シート用: 短縮表記）
+ * フィールド名を翻訳する（日本語名のみ）
  * 翻訳あり → "翻訳名"
  * 翻訳なし → "技術名"
  */
 export function translateFieldShort(technicalName: string): string {
-  const raw = technicalName.startsWith("@")
-    ? technicalName.substring(1)
-    : technicalName;
+  const raw = stripFieldPrefix(technicalName);
   return FIELD_TRANSLATIONS[raw] ?? raw;
 }
+
+/**
+ * 翻訳辞書の出典情報
+ */
+export const TRANSLATION_SOURCE =
+  "SAP公式ドキュメント（IDoc Interface / ABAP Data Dictionary）に基づく翻訳";

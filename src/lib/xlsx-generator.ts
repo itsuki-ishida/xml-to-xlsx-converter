@@ -1,19 +1,20 @@
 import * as XLSX from "xlsx";
 import type { ParsedXmlResult, SheetData } from "./types";
 import {
-  translateSection,
-  translateField,
+  translateSectionShort,
   translateFieldShort,
+  stripFieldPrefix,
+  TRANSLATION_SOURCE,
 } from "./translations";
 
 /**
  * ParsedXmlResult から XLSX ワークブックを生成しダウンロード用の Blob を返す
  *
  * 2シート構成:
- *   シート1「概要」: ファイル情報 + 単一インスタンス要素をセクション+キーバリュー形式で表示
- *   シート2「明細」: 複数インスタンス要素をセクション区切りのテーブル形式で表示（行番号付き）
+ *   シート1「概要」: 3列構成（日本語名 / 技術名 / 値）
+ *   シート2「明細」: セクション区切り、2行ヘッダー（日本語名 + 技術名）、セル結合付き
  *
- * フィールド名・セクション名は翻訳辞書に基づいて日本語に翻訳される。
+ * フィールド名・セクション名はSAP公式ドキュメントに基づいて日本語に翻訳される。
  * 翻訳が存在しないフィールドは元の技術名をそのまま表示する。
  */
 export function generateXlsx(parsed: ParsedXmlResult): Blob {
@@ -22,18 +23,18 @@ export function generateXlsx(parsed: ParsedXmlResult): Blob {
   const singleSheets = parsed.sheets.filter((s) => s.rows.length === 1);
   const multiSheets = parsed.sheets.filter((s) => s.rows.length >= 2);
 
-  // --- シート1: 概要（ファイル情報 + 単一インスタンス要素） ---
+  // --- シート1: 概要（3列: 日本語名 / 技術名 / 値） ---
   if (singleSheets.length > 0) {
     const aoa = buildOverviewSheet(singleSheets, parsed);
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 36 }, { wch: 55 }];
+    ws["!cols"] = [{ wch: 28 }, { wch: 28 }, { wch: 55 }];
     ws["!views"] = [{ state: "frozen", ySplit: 1 }];
     XLSX.utils.book_append_sheet(wb, ws, "概要");
   }
 
-  // --- シート2: 明細（複数インスタンス要素） ---
+  // --- シート2: 明細（2行ヘッダー + セクション見出しセル結合） ---
   if (multiSheets.length > 0) {
-    const aoa = buildDetailsSheet(multiSheets);
+    const { aoa, merges } = buildDetailsSheet(multiSheets);
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     const maxDataCols = Math.max(
       ...multiSheets.map((s) => getDisplayHeaders(s).length)
@@ -43,6 +44,9 @@ export function generateXlsx(parsed: ParsedXmlResult): Blob {
       colWidths.push({ wch: 22 });
     }
     ws["!cols"] = colWidths;
+    if (merges.length > 0) {
+      ws["!merges"] = merges;
+    }
     XLSX.utils.book_append_sheet(wb, ws, "明細");
   }
 
@@ -76,7 +80,7 @@ export function getDisplayHeaders(sheet: SheetData): string[] {
 
 /**
  * 概要シートの2次元配列を構築
- * セクション名・フィールド名は翻訳付き
+ * 3列構成: 項目名（日本語） / 項目名（技術名） / 値
  */
 function buildOverviewSheet(
   sheets: SheetData[],
@@ -84,12 +88,12 @@ function buildOverviewSheet(
 ): string[][] {
   const aoa: string[][] = [];
 
-  aoa.push(["セクション / 項目名", "値"]);
+  aoa.push(["項目名（日本語）", "項目名（技術名）", "値"]);
 
   // ファイル情報
-  aoa.push(["■ ファイル情報", ""]);
-  aoa.push(["  ファイル名", parsed.fileName]);
-  aoa.push(["  ルート要素", parsed.rootElement]);
+  aoa.push(["■ ファイル情報", "", ""]);
+  aoa.push(["  ファイル名", "", parsed.fileName]);
+  aoa.push(["  ルート要素", "", parsed.rootElement]);
   aoa.push([]);
 
   for (let si = 0; si < sheets.length; si++) {
@@ -97,12 +101,14 @@ function buildOverviewSheet(
     const row = sheet.rows[0];
     const displayHeaders = getDisplayHeaders(sheet);
 
-    // セクションヘッダー（翻訳付き）
-    aoa.push([`■ ${translateSection(sheet.name)}`, ""]);
+    // セクションヘッダー（日本語名 + 技術名を別列に）
+    aoa.push([`■ ${translateSectionShort(sheet.name)}`, sheet.name, ""]);
 
-    // 各フィールド（翻訳付き）
+    // 各フィールド（日本語名 + 技術名を別列に）
     for (const header of displayHeaders) {
-      aoa.push([`  ${translateField(header)}`, row[header] ?? ""]);
+      const raw = stripFieldPrefix(header);
+      const ja = translateFieldShort(header);
+      aoa.push([`  ${ja}`, raw, row[header] ?? ""]);
     }
 
     if (si < sheets.length - 1) {
@@ -110,15 +116,22 @@ function buildOverviewSheet(
     }
   }
 
+  // 翻訳出典注記
+  aoa.push([]);
+  aoa.push([`※ ${TRANSLATION_SOURCE}`, "", ""]);
+
   return aoa;
 }
 
 /**
  * 明細シートの2次元配列を構築
- * セクション名は翻訳付きフル表記、列ヘッダーは短縮翻訳
+ * セクション見出しはセル結合、列ヘッダーは2行（日本語名 + 技術名）
  */
-function buildDetailsSheet(sheets: SheetData[]): string[][] {
+function buildDetailsSheet(
+  sheets: SheetData[]
+): { aoa: string[][]; merges: XLSX.Range[] } {
   const aoa: string[][] = [];
+  const merges: XLSX.Range[] = [];
 
   for (let si = 0; si < sheets.length; si++) {
     const sheet = sheets[si];
@@ -128,15 +141,28 @@ function buildDetailsSheet(sheets: SheetData[]): string[][] {
     }
 
     const displayHeaders = getDisplayHeaders(sheet);
+    const totalCols = 1 + displayHeaders.length; // # 列 + データ列
 
-    // セクションヘッダー（翻訳付き）
-    aoa.push([
-      `■ ${translateSection(sheet.name)} (${sheet.rows.length}件)`,
-      ...Array(displayHeaders.length).fill(""),
-    ]);
+    // セクションヘッダー（セル結合で全幅表示）
+    const sectionRowIdx = aoa.length;
+    const sectionJa = translateSectionShort(sheet.name);
+    const sectionLabel =
+      sectionJa !== sheet.name
+        ? `■ ${sectionJa} / ${sheet.name} (${sheet.rows.length}件)`
+        : `■ ${sheet.name} (${sheet.rows.length}件)`;
+    aoa.push([sectionLabel, ...Array(displayHeaders.length).fill("")]);
+    if (totalCols > 1) {
+      merges.push({
+        s: { r: sectionRowIdx, c: 0 },
+        e: { r: sectionRowIdx, c: totalCols - 1 },
+      });
+    }
 
-    // テーブルヘッダー（短縮翻訳: 列幅節約のため翻訳名のみ）
+    // 列ヘッダー1行目: 日本語名
     aoa.push(["#", ...displayHeaders.map(translateFieldShort)]);
+
+    // 列ヘッダー2行目: 技術名（英名）
+    aoa.push(["", ...displayHeaders.map(stripFieldPrefix)]);
 
     // データ行
     for (let ri = 0; ri < sheet.rows.length; ri++) {
@@ -148,7 +174,11 @@ function buildDetailsSheet(sheets: SheetData[]): string[][] {
     }
   }
 
-  return aoa;
+  // 翻訳出典注記
+  aoa.push([]);
+  aoa.push([`※ ${TRANSLATION_SOURCE}`]);
+
+  return { aoa, merges };
 }
 
 /**
