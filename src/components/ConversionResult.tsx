@@ -2,7 +2,12 @@
 
 import { useState } from "react";
 import type { ParsedXmlResult, SheetData } from "@/lib/types";
-import { getXlsxSummary } from "@/lib/xlsx-generator";
+import { getXlsxSummary, getDisplayHeaders } from "@/lib/xlsx-generator";
+import {
+  translateSection,
+  translateField,
+  translateFieldShort,
+} from "@/lib/translations";
 
 interface ConversionResultProps {
   result: ParsedXmlResult;
@@ -42,7 +47,6 @@ export default function ConversionResult({ result }: ConversionResultProps) {
     });
   }
 
-  // タブが1つしかない場合はそれを表示
   const effectiveTab = tabs.length === 1 ? tabs[0].key : activeTab;
 
   return (
@@ -103,27 +107,7 @@ export default function ConversionResult({ result }: ConversionResultProps) {
   );
 }
 
-/**
- * 表示用ヘッダーを取得（全行同一の@属性を除外）
- * xlsx-generator.ts の getDisplayHeaders と同じロジック
- */
-function getDisplayHeaders(sheet: SheetData): string[] {
-  const headers: string[] = [];
-  for (const h of sheet.headers) {
-    if (h.startsWith("@")) {
-      const values = new Set(sheet.rows.map((r) => r[h] ?? ""));
-      if (values.size <= 1) continue;
-    }
-    headers.push(h);
-  }
-  return headers;
-}
-
-function displayHeaderName(h: string): string {
-  return h.startsWith("@") ? h.substring(1) : h;
-}
-
-/** 概要ビュー: ファイル情報 + セクション+キーバリュー */
+/** 概要ビュー: ファイル情報 + 翻訳付きセクション+キーバリュー */
 function OverviewView({
   sheets,
   parsed,
@@ -146,20 +130,20 @@ function OverviewView({
         </div>
       </div>
 
-      {/* 各セクション */}
+      {/* 各セクション（翻訳付き） */}
       {sheets.map((sheet, si) => {
         const row = sheet.rows[0];
         const displayHeaders = getDisplayHeaders(sheet);
         return (
           <div key={si} className="px-4 py-3">
-            <h4 className="mb-2 text-xs font-bold text-blue-700 uppercase tracking-wider">
-              {sheet.name}
+            <h4 className="mb-2 text-xs font-bold text-blue-700 tracking-wider">
+              {translateSection(sheet.name)}
             </h4>
             <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-sm">
               {displayHeaders.map((h) => (
                 <div key={h} className="contents">
                   <span className="text-gray-500 whitespace-nowrap">
-                    {displayHeaderName(h)}
+                    {translateField(h)}
                   </span>
                   <span
                     className="text-gray-800 truncate"
@@ -177,17 +161,16 @@ function OverviewView({
   );
 }
 
-/** 明細ビュー: セクション区切りの行番号付きテーブル */
+/** 明細ビュー: 翻訳付きセクション区切りの行番号付きテーブル */
 function DetailsView({ sheets }: { sheets: SheetData[] }) {
   return (
     <div className="space-y-4 p-4">
       {sheets.map((sheet, si) => {
         const displayHeaders = getDisplayHeaders(sheet);
-        const displayNames = displayHeaders.map(displayHeaderName);
         return (
           <div key={si}>
-            <h4 className="mb-2 text-xs font-bold text-blue-700 uppercase tracking-wider">
-              {sheet.name}{" "}
+            <h4 className="mb-2 text-xs font-bold text-blue-700 tracking-wider">
+              {translateSection(sheet.name)}{" "}
               <span className="text-gray-400 font-normal">
                 ({sheet.rows.length}件)
               </span>
@@ -199,12 +182,12 @@ function DetailsView({ sheets }: { sheets: SheetData[] }) {
                     <th className="px-2 py-2 text-center text-xs font-semibold text-gray-400 w-10">
                       #
                     </th>
-                    {displayNames.map((h) => (
+                    {displayHeaders.map((h) => (
                       <th
                         key={h}
-                        className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap"
+                        className="px-3 py-2 text-left text-xs font-semibold text-gray-500 whitespace-nowrap"
                       >
-                        {h}
+                        {translateFieldShort(h)}
                       </th>
                     ))}
                   </tr>

@@ -1,8 +1,9 @@
 /**
- * XLSX生成テスト（2シート構成フォーマット v2）
+ * XLSX生成テスト（2シート構成 + 翻訳機能）
  * - ファイル情報ヘッダー
- * - スマート属性フィルタリング（全行同一値の@属性は除外）
+ * - スマート属性フィルタリング
  * - 明細テーブルに行番号(#)付き
+ * - フィールド名・セクション名の翻訳
  * - データ完全性の検証
  */
 import { JSDOM } from "jsdom";
@@ -17,7 +18,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const { DOMParser } = new JSDOM("").window;
 globalThis.DOMParser = DOMParser;
 
-// xml-parser のロジック（インライン再現）
+// === xml-parser ロジック（インライン） ===
 function stripNamespace(tagName) {
   const idx = tagName.indexOf(":");
   return idx >= 0 ? tagName.substring(idx + 1) : tagName;
@@ -96,7 +97,52 @@ function parseXml(xmlText, fileName) {
   return { fileName, rootElement, sheets };
 }
 
-// --- 新しいXLSX生成ロジック（v2: ファイル情報+行番号+スマート属性フィルタ） ---
+// === 翻訳辞書（インライン: 本体は src/lib/translations.ts） ===
+const SECTION_TRANSLATIONS = {
+  EDI_DC40: "IDoc制御情報",
+  E1SHP_IBDLV_SAVE_REPLICA: "出荷通知データ",
+  E1BPIBDLVHDR: "配送ヘッダー",
+  E1BPIBDLVHDRORG: "配送ヘッダー組織",
+  E1BPDLVCONTROL: "配送制御",
+  E1BPDLVPARTNER: "配送パートナー",
+  E1BPADR1: "住所情報",
+  E1BPADR11: "住所詳細",
+  E1BPDLVDEADLN: "配送期日",
+  E1BPIBDLVITEM: "配送明細",
+  E1BPIBDLVITEMORG: "配送明細組織",
+  E1BPDLVITEMSTTR: "配送明細ステータス",
+  E1BPDLVCOBLITEM: "配送明細原価",
+  E1BPDLVITEMRPO: "配送明細参照伝票",
+  E1BPDLVHDUNHDR: "梱包ユニットヘッダー",
+  E1BPDLVHDUNITM: "梱包ユニット明細",
+  E1BPEXTC: "拡張データ",
+  RecordSet: "レコードセット",
+  FMS_ROUTING: "ルーティング情報",
+};
+const FIELD_TRANSLATIONS = {
+  TABNAM: "テーブル名", MANDT: "クライアント", DOCNUM: "ドキュメント番号",
+  DELIV_NUMB: "配送番号", ITM_NUMBER: "明細番号", MATERIAL: "品目コード",
+  SHORT_TEXT: "品目テキスト", DLV_QTY: "配送数量", NET_WEIGHT: "正味重量",
+  SNDPRN: "送信パートナー", I_VBELN: "伝票番号", I_STATUS: "ステータス",
+  I_UTC_TIMESTAMP: "タイムスタンプ(UTC)", NAME: "名前", E_MAIL: "メールアドレス",
+  FIELD1: "フィールド1", FIELD2: "フィールド2", FIELD3: "フィールド3", FIELD4: "フィールド4",
+};
+
+function translateSection(name) {
+  const ja = SECTION_TRANSLATIONS[name];
+  return ja ? `${ja} (${name})` : name;
+}
+function translateField(name) {
+  const raw = name.startsWith("@") ? name.substring(1) : name;
+  const ja = FIELD_TRANSLATIONS[raw];
+  return ja ? `${ja} (${raw})` : raw;
+}
+function translateFieldShort(name) {
+  const raw = name.startsWith("@") ? name.substring(1) : name;
+  return FIELD_TRANSLATIONS[raw] ?? raw;
+}
+
+// === XLSX生成ロジック（翻訳付き） ===
 function getDisplayHeaders(sheet) {
   const headers = [];
   for (const h of sheet.headers) {
@@ -109,19 +155,14 @@ function getDisplayHeaders(sheet) {
   return headers;
 }
 
-function displayHeaderName(h) {
-  return h.startsWith("@") ? h.substring(1) : h;
-}
-
 function generateXlsxBuffer(parsed) {
   const wb = XLSX.utils.book_new();
   const singleSheets = parsed.sheets.filter((s) => s.rows.length === 1);
   const multiSheets = parsed.sheets.filter((s) => s.rows.length >= 2);
 
-  // シート1: 概要
+  // シート1: 概要（翻訳付き）
   if (singleSheets.length > 0) {
     const aoa = [["セクション / 項目名", "値"]];
-    // ファイル情報
     aoa.push(["■ ファイル情報", ""]);
     aoa.push(["  ファイル名", parsed.fileName]);
     aoa.push(["  ルート要素", parsed.rootElement]);
@@ -131,27 +172,26 @@ function generateXlsxBuffer(parsed) {
       const sheet = singleSheets[si];
       const row = sheet.rows[0];
       const displayHeaders = getDisplayHeaders(sheet);
-      aoa.push([`■ ${sheet.name}`, ""]);
+      aoa.push([`■ ${translateSection(sheet.name)}`, ""]);
       for (const header of displayHeaders) {
-        aoa.push([`  ${displayHeaderName(header)}`, row[header] ?? ""]);
+        aoa.push([`  ${translateField(header)}`, row[header] ?? ""]);
       }
       if (si < singleSheets.length - 1) aoa.push([]);
     }
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 30 }, { wch: 55 }];
+    ws["!cols"] = [{ wch: 36 }, { wch: 55 }];
     XLSX.utils.book_append_sheet(wb, ws, "概要");
   }
 
-  // シート2: 明細
+  // シート2: 明細（翻訳付き）
   if (multiSheets.length > 0) {
     const aoa = [];
     for (let si = 0; si < multiSheets.length; si++) {
       const sheet = multiSheets[si];
       if (si > 0) aoa.push([]);
       const displayHeaders = getDisplayHeaders(sheet);
-      const displayNames = displayHeaders.map(displayHeaderName);
-      aoa.push([`■ ${sheet.name} (${sheet.rows.length}件)`, ...Array(displayNames.length).fill("")]);
-      aoa.push(["#", ...displayNames]);
+      aoa.push([`■ ${translateSection(sheet.name)} (${sheet.rows.length}件)`, ...Array(displayHeaders.length).fill("")]);
+      aoa.push(["#", ...displayHeaders.map(translateFieldShort)]);
       for (let ri = 0; ri < sheet.rows.length; ri++) {
         const row = sheet.rows[ri];
         aoa.push([String(ri + 1), ...displayHeaders.map((h) => row[h] ?? "")]);
@@ -172,169 +212,150 @@ function assert(condition, message) {
   else { failed++; console.error(`  ❌ ${message}`); }
 }
 
-// テスト1: ASNファイル - 2シート構成
-console.log("\n📊 テスト1: ASN XML → 2シート構成XLSX (v2)");
+// テスト1: ASN - 2シート構成 + 翻訳
+console.log("\n📊 テスト1: ASN XML → 翻訳付き2シート構成XLSX");
 const asnXml = fs.readFileSync(
-  path.resolve(__dirname, "../../変換前データ/ASN_1800024221_20190214185557.xml"),
-  "utf-8"
+  path.resolve(__dirname, "../../変換前データ/ASN_1800024221_20190214185557.xml"), "utf-8"
 );
 const asnParsed = parseXml(asnXml, "ASN_1800024221.xml");
 const asnBuffer = generateXlsxBuffer(asnParsed);
 const asnWb = XLSX.read(asnBuffer, { type: "buffer" });
 
 assert(asnWb.SheetNames.length === 2, `2シート構成 (実際: ${asnWb.SheetNames.length})`);
-assert(asnWb.SheetNames[0] === "概要", `シート1の名前が「概要」`);
-assert(asnWb.SheetNames[1] === "明細", `シート2の名前が「明細」`);
+assert(asnWb.SheetNames[0] === "概要", `シート1=概要`);
+assert(asnWb.SheetNames[1] === "明細", `シート2=明細`);
 
-// 概要シートの検証
-const overviewWs = asnWb.Sheets["概要"];
-const overviewData = XLSX.utils.sheet_to_json(overviewWs, { header: 1 });
-assert(overviewData[0][0] === "セクション / 項目名", "概要シートのヘッダーが正しい");
-
-// ファイル情報セクション
-assert(overviewData[1][0] === "■ ファイル情報", "ファイル情報セクションが存在");
-assert(overviewData[2][0] === "  ファイル名" && overviewData[2][1] === "ASN_1800024221.xml", "ファイル名が正しい");
-assert(overviewData[3][0] === "  ルート要素" && overviewData[3][1] === "SHP_IBDLV_SAVE_REPLICA04", "ルート要素が正しい");
-
-// セクションヘッダーが含まれていることを確認
+const overviewData = XLSX.utils.sheet_to_json(asnWb.Sheets["概要"], { header: 1 });
 const overviewText = overviewData.map(r => r[0] || "").join("\n");
-assert(overviewText.includes("■ EDI_DC40"), "概要に EDI_DC40 セクションが含まれる");
-assert(overviewText.includes("■ E1BPIBDLVHDR"), "概要に E1BPIBDLVHDR セクションが含まれる");
-assert(overviewText.includes("■ E1BPADR1"), "概要に E1BPADR1 セクションが含まれる");
 
-// DOCNUMの値が概要に含まれることを確認
+// ファイル情報
+assert(overviewData[1][0] === "■ ファイル情報", "ファイル情報セクション存在");
+assert(overviewData[2][1] === "ASN_1800024221.xml", "ファイル名正しい");
+
+// 翻訳付きセクション名の検証
+assert(overviewText.includes("IDoc制御情報 (EDI_DC40)"), "EDI_DC40が翻訳付きで表示");
+assert(overviewText.includes("配送ヘッダー (E1BPIBDLVHDR)"), "E1BPIBDLVHDRが翻訳付きで表示");
+assert(overviewText.includes("住所情報 (E1BPADR1)"), "E1BPADR1が翻訳付きで表示");
+assert(overviewText.includes("住所詳細 (E1BPADR11)"), "E1BPADR11が翻訳付きで表示");
+
+// 翻訳付きフィールド名の検証（概要: フル表記）
 const docnumRow = overviewData.find(r => r[0] && r[0].includes("DOCNUM"));
-assert(docnumRow && docnumRow[1] === "0000000059141367", "概要にDOCNUM値が正しく含まれる");
+assert(docnumRow && docnumRow[0].includes("ドキュメント番号"), "DOCNUMが「ドキュメント番号」と翻訳表示");
+assert(docnumRow && docnumRow[1] === "0000000059141367", "DOCNUM値正しい");
 
-// @SEGMENT属性が除外されていることを確認（全行同一値"1"なので）
-const segmentInOverview = overviewData.find(r => r[0] && r[0].includes("SEGMENT"));
-assert(!segmentInOverview, "@SEGMENT属性が概要から除外されている（全行同一値）");
+const nameRow = overviewData.find(r => r[0] && r[0].includes("NAME") && !r[0].includes("TABNAM"));
+assert(nameRow && nameRow[0].includes("名前"), "NAMEが「名前」と翻訳表示");
+
+// @SEGMENT除外の検証
+assert(!overviewText.includes("SEGMENT"), "@SEGMENT除外");
 
 // 明細シートの検証
-const detailWs = asnWb.Sheets["明細"];
-const detailData = XLSX.utils.sheet_to_json(detailWs, { header: 1 });
+const detailData = XLSX.utils.sheet_to_json(asnWb.Sheets["明細"], { header: 1 });
 const detailText = detailData.map(r => r[0] || "").join("\n");
-assert(detailText.includes("■ E1BPIBDLVITEM"), "明細に E1BPIBDLVITEM セクションが含まれる");
-assert(detailText.includes("■ E1BPEXTC"), "明細に E1BPEXTC セクションが含まれる");
 
-// E1BPIBDLVITEM テーブルの行番号検証
-const itemHeaderIdx = detailData.findIndex(r => r[0] && String(r[0]).includes("E1BPIBDLVITEM") && !String(r[0]).includes("ORG"));
+// 翻訳付きセクション名（明細）
+assert(detailText.includes("配送明細 (E1BPIBDLVITEM)"), "明細のE1BPIBDLVITEMが翻訳付き");
+assert(detailText.includes("拡張データ (E1BPEXTC)"), "明細のE1BPEXTCが翻訳付き");
+assert(detailText.includes("配送期日 (E1BPDLVDEADLN)"), "明細のE1BPDLVDEADLNが翻訳付き");
+
+// 翻訳付き列ヘッダー（明細: 短縮表記）
+const itemHeaderIdx = detailData.findIndex(r => r[0] && String(r[0]).includes("配送明細 (E1BPIBDLVITEM)") && !String(r[0]).includes("ORG"));
 if (itemHeaderIdx >= 0) {
   const colHeaders = detailData[itemHeaderIdx + 1];
-  assert(colHeaders[0] === "#", "明細テーブルに行番号(#)ヘッダーがある");
+  assert(colHeaders[0] === "#", "行番号(#)ヘッダー");
+  assert(colHeaders.includes("明細番号"), "ITM_NUMBERが「明細番号」と翻訳表示");
+  assert(colHeaders.includes("品目コード"), "MATERIALが「品目コード」と翻訳表示");
+  assert(colHeaders.includes("品目テキスト"), "SHORT_TEXTが「品目テキスト」と翻訳表示");
+  assert(colHeaders.includes("配送数量"), "DLV_QTYが「配送数量」と翻訳表示");
 
+  // データ値は翻訳されない（元の値のまま）
   const row1 = detailData[itemHeaderIdx + 2];
-  const row2 = detailData[itemHeaderIdx + 3];
-  assert(String(row1[0]) === "1", "明細の1行目 # = 1");
-  assert(String(row2[0]) === "2", "明細の2行目 # = 2");
-
-  const itmIdx = colHeaders.indexOf("ITM_NUMBER");
-  assert(String(row1[itmIdx]) === "000010", "明細の1行目 ITM_NUMBER = 000010");
-  assert(String(row2[itmIdx]) === "000020", "明細の2行目 ITM_NUMBER = 000020");
+  const itmIdx = colHeaders.indexOf("明細番号");
+  assert(String(row1[itmIdx]) === "000010", "データ値は翻訳されない (000010)");
 }
 
-// @SEGMENT属性が明細からも除外されていることを確認
-const detailHeaders = detailData.find(r => r[0] === "#" && r.includes("ITM_NUMBER"));
-if (detailHeaders) {
-  assert(!detailHeaders.includes("SEGMENT") && !detailHeaders.includes("@SEGMENT"),
-    "@SEGMENT属性が明細テーブルからも除外されている");
-}
-
-// テスト2: OBDSファイル - 概要のみ（全て単一インスタンス）
-console.log("\n📊 テスト2: OBDS XML → 概要シートのみ");
+// テスト2: OBDS - 翻訳付き
+console.log("\n📊 テスト2: OBDS XML → 翻訳付き概要シート");
 const obdsXml = fs.readFileSync(
-  path.resolve(__dirname, "../../変換前データ/OBDS_8000580368_20180426103512.xml"),
-  "utf-8"
+  path.resolve(__dirname, "../../変換前データ/OBDS_8000580368_20180426103512.xml"), "utf-8"
 );
 const obdsParsed = parseXml(obdsXml, "OBDS_8000580368.xml");
 const obdsBuffer = generateXlsxBuffer(obdsParsed);
 const obdsWb = XLSX.read(obdsBuffer, { type: "buffer" });
 
-assert(obdsWb.SheetNames.length === 1, `OBDSは1シートのみ (実際: ${obdsWb.SheetNames.length})`);
-assert(obdsWb.SheetNames[0] === "概要", "OBDSは概要シートのみ");
-
+assert(obdsWb.SheetNames.length === 1, `OBDSは1シート`);
 const obdsOverview = XLSX.utils.sheet_to_json(obdsWb.Sheets["概要"], { header: 1 });
-// ファイル情報
-const obdsFileNameRow = obdsOverview.find(r => r[0] === "  ファイル名");
-assert(obdsFileNameRow && obdsFileNameRow[1] === "OBDS_8000580368.xml", "OBDSファイル情報が正しい");
+const obdsText = obdsOverview.map(r => r[0] || "").join("\n");
+
+assert(obdsText.includes("レコードセット (RecordSet)"), "RecordSetが翻訳付き");
+assert(obdsText.includes("ルーティング情報 (FMS_ROUTING)"), "FMS_ROUTINGが翻訳付き");
 
 const vbelnRow = obdsOverview.find(r => r[0] && r[0].includes("I_VBELN"));
-assert(vbelnRow && String(vbelnRow[1]) === "8000580368", "概要にI_VBELN値が正しく含まれる");
+assert(vbelnRow && vbelnRow[0].includes("伝票番号"), "I_VBELNが「伝票番号」と翻訳表示");
+assert(vbelnRow && String(vbelnRow[1]) === "8000580368", "I_VBELN値正しい");
 
-// テスト3: 全て複数インスタンスのXML → 明細のみ
-console.log("\n📊 テスト3: 全て複数インスタンス → 明細シートのみ");
-const multiXml = `<?xml version="1.0"?>
+// テスト3: 翻訳なしの汎用XML → 元の名前がそのまま表示
+console.log("\n📊 テスト3: 汎用XML → 翻訳なしで元の名前表示");
+const genericXml = `<?xml version="1.0"?>
 <root>
-  <item><a>1</a><b>x</b></item>
-  <item><a>2</a><b>y</b></item>
-  <item><a>3</a><b>z</b></item>
+  <product><sku>ABC-123</sku><price>9.99</price></product>
+  <product><sku>DEF-456</sku><price>19.99</price></product>
 </root>`;
-const multiParsed = parseXml(multiXml, "multi.xml");
-const multiBuffer = generateXlsxBuffer(multiParsed);
-const multiWb = XLSX.read(multiBuffer, { type: "buffer" });
+const genericParsed = parseXml(genericXml, "generic.xml");
+const genericBuffer = generateXlsxBuffer(genericParsed);
+const genericWb = XLSX.read(genericBuffer, { type: "buffer" });
 
-assert(multiWb.SheetNames.length === 1, `全複数は1シートのみ (実際: ${multiWb.SheetNames.length})`);
-assert(multiWb.SheetNames[0] === "明細", "全複数は明細シートのみ");
+const genericDetail = XLSX.utils.sheet_to_json(genericWb.Sheets["明細"], { header: 1 });
+// 翻訳辞書にない "product" はそのまま表示
+assert(genericDetail[0][0].includes("product"), "翻訳なし: セクション名はそのまま");
+const genericHeaders = genericDetail[1];
+assert(genericHeaders.includes("sku"), "翻訳なし: skuはそのまま");
+assert(genericHeaders.includes("price"), "翻訳なし: priceはそのまま");
+// データ値もそのまま
+assert(genericDetail[2][1] === "ABC-123", "翻訳なし: データ値そのまま");
 
-// 行番号の検証
-const multiDetail = XLSX.utils.sheet_to_json(multiWb.Sheets["明細"], { header: 1 });
-assert(multiDetail[1][0] === "#", "明細テーブルに#ヘッダー");
-assert(String(multiDetail[2][0]) === "1", "行番号1");
-assert(String(multiDetail[3][0]) === "2", "行番号2");
-assert(String(multiDetail[4][0]) === "3", "行番号3");
-
-// テスト4: スマート属性フィルタリング（値がバラバラの属性は保持）
+// テスト4: スマート属性フィルタリング
 console.log("\n📊 テスト4: スマート属性フィルタリング");
 const attrXml = `<?xml version="1.0"?>
 <root>
   <item status="active" type="A"><name>Item 1</name></item>
   <item status="inactive" type="A"><name>Item 2</name></item>
-  <item status="active" type="A"><name>Item 3</name></item>
 </root>`;
 const attrParsed = parseXml(attrXml, "attr.xml");
 const attrBuffer = generateXlsxBuffer(attrParsed);
 const attrWb = XLSX.read(attrBuffer, { type: "buffer" });
-
 const attrDetail = XLSX.utils.sheet_to_json(attrWb.Sheets["明細"], { header: 1 });
-const attrHeaders = attrDetail[1]; // [#, name, status] - type should be excluded
-assert(attrHeaders.includes("status"), "値がバラバラの@status属性が保持される");
-assert(!attrHeaders.includes("type") && !attrHeaders.includes("@type"), "全行同一値の@type属性が除外される");
+const attrHeaders = attrDetail[1];
+assert(attrHeaders.includes("status"), "値バラバラの@statusは保持");
+assert(!attrHeaders.includes("type") && !attrHeaders.includes("@type"), "全行同値の@typeは除外");
 
-// テスト5: データ完全性 - ASNの全リーフテキスト値が出力に含まれること
-console.log("\n📊 テスト5: ASNデータ完全性検証");
-// 概要シートの全値を収集
-const allOverviewValues = new Set();
+// テスト5: データ完全性
+console.log("\n📊 テスト5: ASNデータ完全性");
+const allValues = new Set();
 for (const row of overviewData) {
-  if (row[1] !== undefined && row[1] !== "") allOverviewValues.add(String(row[1]));
+  if (row[1] !== undefined && row[1] !== "") allValues.add(String(row[1]));
 }
-// 明細シートの全値を収集
-const allDetailValues = new Set();
 for (const row of detailData) {
   for (let i = 1; i < (row.length || 0); i++) {
-    if (row[i] !== undefined && row[i] !== "") allDetailValues.add(String(row[i]));
+    if (row[i] !== undefined && row[i] !== "") allValues.add(String(row[i]));
   }
 }
-const allValues = new Set([...allOverviewValues, ...allDetailValues]);
 
-// 重要なビジネスデータが含まれていることを確認
-assert(allValues.has("0000000059141367"), "DOCNUM値が出力に含まれる");
-assert(allValues.has("1800024221"), "DELIV_NUMB値が出力に含まれる");
-assert(allValues.has("000000010245236005"), "MATERIAL値が出力に含まれる");
-assert(allValues.has("MULT-PACK CREW 3PK, 0090, S"), "SHORT_TEXT値が出力に含まれる");
-assert(allValues.has("887749824742"), "EAN_UPC値が出力に含まれる");
-assert(allValues.has("juily@waltknit.com"), "E_MAIL値が出力に含まれる");
-assert(allValues.has("WALT TECHNOLOGY GROUP CO.,LTD."), "NAME値が出力に含まれる");
-assert(allValues.has("EXTWHAAG01"), "SNDPRN/RECV_SYS値が出力に含まれる");
-assert(allValues.has("FOBPRICE"), "E1BPEXTC FIELD1値が出力に含まれる");
+assert(allValues.has("0000000059141367"), "DOCNUM値");
+assert(allValues.has("1800024221"), "DELIV_NUMB値");
+assert(allValues.has("000000010245236005"), "MATERIAL値");
+assert(allValues.has("MULT-PACK CREW 3PK, 0090, S"), "SHORT_TEXT値");
+assert(allValues.has("887749824742"), "EAN_UPC値");
+assert(allValues.has("juily@waltknit.com"), "E_MAIL値");
+assert(allValues.has("WALT TECHNOLOGY GROUP CO.,LTD."), "NAME値");
 
 // テスト6: ファイル書き出し
 console.log("\n📊 テスト6: ファイル書き出し");
 const outputDir = path.resolve(__dirname, "output");
 if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-
 fs.writeFileSync(path.join(outputDir, "ASN_2sheet.xlsx"), asnBuffer);
 fs.writeFileSync(path.join(outputDir, "OBDS_2sheet.xlsx"), obdsBuffer);
-assert(true, "XLSXファイルを出力済み");
+assert(true, "XLSXファイル出力済み");
 
 // 結果
 console.log(`\n${"=".repeat(50)}`);

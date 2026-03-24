@@ -1,5 +1,10 @@
 import * as XLSX from "xlsx";
 import type { ParsedXmlResult, SheetData } from "./types";
+import {
+  translateSection,
+  translateField,
+  translateFieldShort,
+} from "./translations";
 
 /**
  * ParsedXmlResult から XLSX ワークブックを生成しダウンロード用の Blob を返す
@@ -8,8 +13,8 @@ import type { ParsedXmlResult, SheetData } from "./types";
  *   シート1「概要」: ファイル情報 + 単一インスタンス要素をセクション+キーバリュー形式で表示
  *   シート2「明細」: 複数インスタンス要素をセクション区切りのテーブル形式で表示（行番号付き）
  *
- * 全て単一の場合は「概要」のみ、全て複数の場合は「明細」のみ生成
- * 属性は全行で同一値の場合のみ除外（メタデータノイズ除去）
+ * フィールド名・セクション名は翻訳辞書に基づいて日本語に翻訳される。
+ * 翻訳が存在しないフィールドは元の技術名をそのまま表示する。
  */
 export function generateXlsx(parsed: ParsedXmlResult): Blob {
   const wb = XLSX.utils.book_new();
@@ -21,7 +26,7 @@ export function generateXlsx(parsed: ParsedXmlResult): Blob {
   if (singleSheets.length > 0) {
     const aoa = buildOverviewSheet(singleSheets, parsed);
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 30 }, { wch: 55 }];
+    ws["!cols"] = [{ wch: 36 }, { wch: 55 }];
     ws["!views"] = [{ state: "frozen", ySplit: 1 }];
     XLSX.utils.book_append_sheet(wb, ws, "概要");
   }
@@ -30,7 +35,6 @@ export function generateXlsx(parsed: ParsedXmlResult): Blob {
   if (multiSheets.length > 0) {
     const aoa = buildDetailsSheet(multiSheets);
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    // 列幅: # 列 + 最大データ列数
     const maxDataCols = Math.max(
       ...multiSheets.map((s) => getDisplayHeaders(s).length)
     );
@@ -57,14 +61,13 @@ export function generateXlsx(parsed: ParsedXmlResult): Blob {
 /**
  * 表示用ヘッダーを取得する
  * 全行で同一値の @属性列は除外（メタデータノイズ）
- * 意味のある属性（値がバラバラのもの）は保持
  */
-function getDisplayHeaders(sheet: SheetData): string[] {
+export function getDisplayHeaders(sheet: SheetData): string[] {
   const headers: string[] = [];
   for (const h of sheet.headers) {
     if (h.startsWith("@")) {
       const values = new Set(sheet.rows.map((r) => r[h] ?? ""));
-      if (values.size <= 1) continue; // 全行同一値 → 除外
+      if (values.size <= 1) continue;
     }
     headers.push(h);
   }
@@ -72,15 +75,8 @@ function getDisplayHeaders(sheet: SheetData): string[] {
 }
 
 /**
- * ヘッダー表示名を返す（@プレフィックスを除去）
- */
-function displayHeaderName(h: string): string {
-  return h.startsWith("@") ? h.substring(1) : h;
-}
-
-/**
  * 概要シートの2次元配列を構築
- * ファイル情報 + セクション名 + キーバリュー形式
+ * セクション名・フィールド名は翻訳付き
  */
 function buildOverviewSheet(
   sheets: SheetData[],
@@ -88,10 +84,9 @@ function buildOverviewSheet(
 ): string[][] {
   const aoa: string[][] = [];
 
-  // ヘッダー行
   aoa.push(["セクション / 項目名", "値"]);
 
-  // ファイル情報セクション
+  // ファイル情報
   aoa.push(["■ ファイル情報", ""]);
   aoa.push(["  ファイル名", parsed.fileName]);
   aoa.push(["  ルート要素", parsed.rootElement]);
@@ -102,15 +97,14 @@ function buildOverviewSheet(
     const row = sheet.rows[0];
     const displayHeaders = getDisplayHeaders(sheet);
 
-    // セクションヘッダー
-    aoa.push([`■ ${sheet.name}`, ""]);
+    // セクションヘッダー（翻訳付き）
+    aoa.push([`■ ${translateSection(sheet.name)}`, ""]);
 
-    // 各フィールドをキーバリューで出力
+    // 各フィールド（翻訳付き）
     for (const header of displayHeaders) {
-      aoa.push([`  ${displayHeaderName(header)}`, row[header] ?? ""]);
+      aoa.push([`  ${translateField(header)}`, row[header] ?? ""]);
     }
 
-    // 次のセクションとの間に空行
     if (si < sheets.length - 1) {
       aoa.push([]);
     }
@@ -121,7 +115,7 @@ function buildOverviewSheet(
 
 /**
  * 明細シートの2次元配列を構築
- * セクション名 + 行番号付きテーブル形式
+ * セクション名は翻訳付きフル表記、列ヘッダーは短縮翻訳
  */
 function buildDetailsSheet(sheets: SheetData[]): string[][] {
   const aoa: string[][] = [];
@@ -129,24 +123,22 @@ function buildDetailsSheet(sheets: SheetData[]): string[][] {
   for (let si = 0; si < sheets.length; si++) {
     const sheet = sheets[si];
 
-    // セクション区切り（最初以外は空行を挿入）
     if (si > 0) {
       aoa.push([]);
     }
 
     const displayHeaders = getDisplayHeaders(sheet);
-    const displayNames = displayHeaders.map(displayHeaderName);
 
-    // セクションヘッダー
+    // セクションヘッダー（翻訳付き）
     aoa.push([
-      `■ ${sheet.name} (${sheet.rows.length}件)`,
-      ...Array(displayNames.length).fill(""),
+      `■ ${translateSection(sheet.name)} (${sheet.rows.length}件)`,
+      ...Array(displayHeaders.length).fill(""),
     ]);
 
-    // テーブルヘッダー（# + データヘッダー）
-    aoa.push(["#", ...displayNames]);
+    // テーブルヘッダー（短縮翻訳: 列幅節約のため翻訳名のみ）
+    aoa.push(["#", ...displayHeaders.map(translateFieldShort)]);
 
-    // データ行（行番号付き）
+    // データ行
     for (let ri = 0; ri < sheet.rows.length; ri++) {
       const row = sheet.rows[ri];
       aoa.push([
