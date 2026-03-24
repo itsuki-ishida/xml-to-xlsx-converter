@@ -107,9 +107,16 @@ export default function Home() {
       if (!f.result) continue;
       const blob = generateXlsx(f.result);
       const xlsxName = changeExtension(f.file.name, "xlsx");
-      zip.file(xlsxName, blob);
+      // Windows禁止文字をファイル名から除去
+      const safeName = xlsxName.replace(/[<>:"/\\|?*]/g, "_");
+      zip.file(safeName, blob);
     }
-    const zipBlob = await zip.generateAsync({ type: "blob" });
+    const zipBlob = await zip.generateAsync({
+      type: "blob",
+      platform: "DOS",
+      compression: "DEFLATE",
+      compressionOptions: { level: 6 },
+    });
     saveAs(zipBlob, "converted_xlsx_files.zip");
   }, [files, handleDownload]);
 
