@@ -1,70 +1,121 @@
 import * as XLSX from "xlsx";
-import type { ParsedXmlResult } from "./types";
+import type { ParsedXmlResult, SheetData } from "./types";
 
 /**
  * ParsedXmlResult から XLSX ワークブックを生成しダウンロード用の Blob を返す
+ *
+ * 2シート構成:
+ *   シート1「概要」: 単一インスタンス要素をセクション+キーバリュー形式で表示
+ *   シート2「明細」: 複数インスタンス要素をセクション区切りのテーブル形式で表示
+ *
+ * 全て単一の場合は「概要」のみ、全て複数の場合は「明細」のみ生成
  */
 export function generateXlsx(parsed: ParsedXmlResult): Blob {
   const wb = XLSX.utils.book_new();
 
-  for (const sheet of parsed.sheets) {
-    // ヘッダー行 + データ行の2次元配列を構築
-    const aoa: string[][] = [];
+  // シートを単一(1行)と複数(2行以上)に分類
+  const singleSheets = parsed.sheets.filter((s) => s.rows.length === 1);
+  const multiSheets = parsed.sheets.filter((s) => s.rows.length >= 2);
 
-    // ヘッダー行
-    aoa.push(sheet.headers);
-
-    // データ行
-    for (const row of sheet.rows) {
-      const rowData: string[] = sheet.headers.map((h) => row[h] ?? "");
-      aoa.push(rowData);
-    }
-
+  // --- シート1: 概要（単一インスタンス要素） ---
+  if (singleSheets.length > 0) {
+    const aoa = buildOverviewSheet(singleSheets);
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-
-    // 列幅の自動調整
-    const colWidths: number[] = sheet.headers.map((h) => {
-      let maxLen = h.length;
-      for (const row of sheet.rows) {
-        const val = row[h] ?? "";
-        maxLen = Math.max(maxLen, val.length);
-      }
-      // 最大幅を60文字に制限、最小幅は8文字
-      return Math.min(Math.max(maxLen + 2, 8), 60);
-    });
-    ws["!cols"] = colWidths.map((w) => ({ wch: w }));
-
-    // ヘッダー行をフリーズ（固定表示）
-    if (!ws["!views"]) ws["!views"] = [];
-    (ws["!views"] as Array<Record<string, unknown>>).push({
-      state: "frozen",
-      ySplit: 1,
-    });
-
-    // オートフィルターを設定
-    if (sheet.headers.length > 0 && sheet.rows.length > 0) {
-      ws["!autofilter"] = {
-        ref: XLSX.utils.encode_range({
-          s: { r: 0, c: 0 },
-          e: { r: sheet.rows.length, c: sheet.headers.length - 1 },
-        }),
-      };
-    }
-
-    XLSX.utils.book_append_sheet(wb, ws, sheet.name);
+    ws["!cols"] = [{ wch: 28 }, { wch: 50 }];
+    // 1行目をフリーズ
+    ws["!views"] = [{ state: "frozen", ySplit: 1 }];
+    XLSX.utils.book_append_sheet(wb, ws, "概要");
   }
 
-  // ワークブックが空の場合、空のシートを追加
+  // --- シート2: 明細（複数インスタンス要素） ---
+  if (multiSheets.length > 0) {
+    const aoa = buildDetailsSheet(multiSheets);
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    // 列幅: 最大列数に基づいて設定
+    const maxCols = Math.max(...multiSheets.map((s) => s.headers.length));
+    const colWidths: XLSX.ColInfo[] = [];
+    for (let i = 0; i < maxCols; i++) {
+      colWidths.push({ wch: 22 });
+    }
+    ws["!cols"] = colWidths;
+    XLSX.utils.book_append_sheet(wb, ws, "明細");
+  }
+
+  // ワークブックが空の場合
   if (parsed.sheets.length === 0) {
     const ws = XLSX.utils.aoa_to_sheet([["（データなし）"]]);
     XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
   }
 
-  // Blobとして出力
   const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
   return new Blob([wbout], {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   });
+}
+
+/**
+ * 概要シートの2次元配列を構築
+ * セクション名 + キーバリュー形式
+ */
+function buildOverviewSheet(sheets: SheetData[]): string[][] {
+  const aoa: string[][] = [];
+
+  // ヘッダー行
+  aoa.push(["セクション / 項目名", "値"]);
+
+  for (let si = 0; si < sheets.length; si++) {
+    const sheet = sheets[si];
+    const row = sheet.rows[0];
+
+    // セクション区切り（最初以外は空行を挿入）
+    if (si > 0) {
+      aoa.push([]);
+    }
+
+    // セクションヘッダー
+    aoa.push([`■ ${sheet.name}`, ""]);
+
+    // 各フィールドをキーバリューで出力（@属性列は除外）
+    for (const header of sheet.headers) {
+      if (header.startsWith("@")) continue;
+      aoa.push([`  ${header}`, row[header] ?? ""]);
+    }
+  }
+
+  return aoa;
+}
+
+/**
+ * 明細シートの2次元配列を構築
+ * セクション名 + テーブル形式
+ */
+function buildDetailsSheet(sheets: SheetData[]): string[][] {
+  const aoa: string[][] = [];
+
+  for (let si = 0; si < sheets.length; si++) {
+    const sheet = sheets[si];
+
+    // セクション区切り（最初以外は空行を挿入）
+    if (si > 0) {
+      aoa.push([]);
+    }
+
+    // @属性列を除外したヘッダー
+    const dataHeaders = sheet.headers.filter((h) => !h.startsWith("@"));
+
+    // セクションヘッダー
+    aoa.push([`■ ${sheet.name} (${sheet.rows.length}件)`, ...Array(dataHeaders.length - 1).fill("")]);
+
+    // テーブルヘッダー
+    aoa.push(dataHeaders);
+
+    // データ行
+    for (const row of sheet.rows) {
+      aoa.push(dataHeaders.map((h) => row[h] ?? ""));
+    }
+  }
+
+  return aoa;
 }
 
 /**
