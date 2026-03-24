@@ -6,7 +6,8 @@
  * - データ完全性の検証
  */
 import { JSDOM } from "jsdom";
-import XLSX from "xlsx";
+import XLSX from "xlsx-js-style";
+import JSZip from "jszip";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -142,7 +143,46 @@ function translateFieldShort(name) {
   return FIELD_TRANSLATIONS[raw] ?? raw;
 }
 
-// === XLSX生成ロジック（バイリンガル対応） ===
+// === スタイル定義 ===
+const BORDER_THIN = {
+  top: { style: "thin", color: { rgb: "D9D9D9" } },
+  bottom: { style: "thin", color: { rgb: "D9D9D9" } },
+  left: { style: "thin", color: { rgb: "D9D9D9" } },
+  right: { style: "thin", color: { rgb: "D9D9D9" } },
+};
+const STYLES = {
+  overviewHeader: { font: { bold: true, color: { rgb: "FFFFFF" }, sz: 11 }, fill: { fgColor: { rgb: "2F5496" } }, border: BORDER_THIN, alignment: { vertical: "center" } },
+  overviewSection: { font: { bold: true, sz: 11, color: { rgb: "1F3864" } }, fill: { fgColor: { rgb: "D6E4F0" } }, border: BORDER_THIN },
+  overviewFieldJa: { font: { sz: 10 }, border: BORDER_THIN },
+  overviewFieldTech: { font: { sz: 9, color: { rgb: "808080" } }, border: BORDER_THIN },
+  overviewFieldValue: { font: { sz: 10 }, border: BORDER_THIN },
+  detailSection: { font: { bold: true, color: { rgb: "FFFFFF" }, sz: 11 }, fill: { fgColor: { rgb: "2F5496" } }, border: BORDER_THIN, alignment: { vertical: "center" } },
+  detailHeaderJa: { font: { bold: true, color: { rgb: "FFFFFF" }, sz: 10 }, fill: { fgColor: { rgb: "4472C4" } }, border: BORDER_THIN },
+  detailHeaderTech: { font: { sz: 9, color: { rgb: "808080" } }, fill: { fgColor: { rgb: "F2F2F2" } }, border: BORDER_THIN },
+  detailData: { font: { sz: 10 }, border: BORDER_THIN },
+  detailDataAlt: { font: { sz: 10 }, fill: { fgColor: { rgb: "F7F9FC" } }, border: BORDER_THIN },
+  detailRowNum: { font: { sz: 9, color: { rgb: "999999" } }, border: BORDER_THIN, alignment: { horizontal: "center" } },
+  detailRowNumAlt: { font: { sz: 9, color: { rgb: "999999" } }, fill: { fgColor: { rgb: "F7F9FC" } }, border: BORDER_THIN, alignment: { horizontal: "center" } },
+  sourceNote: { font: { italic: true, sz: 9, color: { rgb: "999999" } } },
+};
+
+function applyRowStyle(ws, row, colCount, style) {
+  for (let c = 0; c < colCount; c++) {
+    const ref = XLSX.utils.encode_cell({ r: row, c });
+    if (!ws[ref]) ws[ref] = { v: "", t: "s" };
+    ws[ref].s = style;
+  }
+}
+function applyCellStyle(ws, row, col, style) {
+  const ref = XLSX.utils.encode_cell({ r: row, c: col });
+  if (!ws[ref]) ws[ref] = { v: "", t: "s" };
+  ws[ref].s = style;
+}
+
+// === シート分割閾値 ===
+const LARGE_TABLE_THRESHOLD = 30;
+
+// === XLSX生成ロジック（バイリンガル + スタイリング + シート分割対応） ===
 function getDisplayHeaders(sheet) {
   const headers = [];
   for (const h of sheet.headers) {
@@ -155,10 +195,92 @@ function getDisplayHeaders(sheet) {
   return headers;
 }
 
-function generateXlsxBuffer(parsed) {
+function makeUniqueSheetName(sectionName, usedNames) {
+  const ja = translateSectionShort(sectionName);
+  let base = ja !== sectionName ? ja : sectionName;
+  base = base.replace(/[\\/?*[\]:]/g, "_");
+  if (base.length > 31) base = base.substring(0, 31);
+  let name = base;
+  let suffix = 2;
+  while (usedNames.has(name)) {
+    const suffixStr = `_${suffix}`;
+    name = base.substring(0, 31 - suffixStr.length) + suffixStr;
+    suffix++;
+  }
+  return name;
+}
+
+function buildDetailAoa(sheets) {
+  const aoa = [];
+  const merges = [];
+  for (let si = 0; si < sheets.length; si++) {
+    const sheet = sheets[si];
+    if (si > 0) aoa.push([]);
+    const displayHeaders = getDisplayHeaders(sheet);
+    const totalCols = 1 + displayHeaders.length;
+
+    const sectionRowIdx = aoa.length;
+    const sectionJa = translateSectionShort(sheet.name);
+    const sectionLabel = sectionJa !== sheet.name
+      ? `■ ${sectionJa} / ${sheet.name} (${sheet.rows.length}件)`
+      : `■ ${sheet.name} (${sheet.rows.length}件)`;
+    aoa.push([sectionLabel, ...Array(displayHeaders.length).fill("")]);
+    if (totalCols > 1) {
+      merges.push({ s: { r: sectionRowIdx, c: 0 }, e: { r: sectionRowIdx, c: totalCols - 1 } });
+    }
+
+    aoa.push(["#", ...displayHeaders.map(translateFieldShort)]);
+    aoa.push(["", ...displayHeaders.map(stripFieldPrefix)]);
+
+    for (let ri = 0; ri < sheet.rows.length; ri++) {
+      const row = sheet.rows[ri];
+      aoa.push([String(ri + 1), ...displayHeaders.map((h) => row[h] ?? "")]);
+    }
+  }
+  aoa.push([]);
+  aoa.push([`※ ${TRANSLATION_SOURCE}`]);
+  const maxCols = Math.max(...sheets.map(s => 1 + getDisplayHeaders(s).length));
+  return { aoa, merges, maxCols };
+}
+
+function applyDetailStylesToWs(ws, aoa, maxCols) {
+  const detailRowHeights = [];
+  let dataRowIdx = 0;
+  for (let r = 0; r < aoa.length; r++) {
+    const cellA = String(aoa[r][0] || "");
+    if (cellA.startsWith("■")) {
+      applyRowStyle(ws, r, maxCols, STYLES.detailSection);
+      detailRowHeights[r] = { hpt: 24 };
+      dataRowIdx = 0;
+    } else if (cellA === "#") {
+      applyRowStyle(ws, r, maxCols, STYLES.detailHeaderJa);
+      detailRowHeights[r] = { hpt: 20 };
+    } else if (r > 0 && String(aoa[r - 1]?.[0] || "") === "#") {
+      applyRowStyle(ws, r, maxCols, STYLES.detailHeaderTech);
+    } else if (cellA.startsWith("※")) {
+      applyCellStyle(ws, r, 0, STYLES.sourceNote);
+    } else if (cellA.match(/^\d+$/)) {
+      const isAlt = dataRowIdx % 2 === 1;
+      applyCellStyle(ws, r, 0, isAlt ? STYLES.detailRowNumAlt : STYLES.detailRowNum);
+      for (let c = 1; c < maxCols; c++) {
+        applyCellStyle(ws, r, c, isAlt ? STYLES.detailDataAlt : STYLES.detailData);
+      }
+      dataRowIdx++;
+    }
+  }
+  ws["!rows"] = detailRowHeights;
+}
+
+async function generateXlsxBuffer(parsed) {
   const wb = XLSX.utils.book_new();
   const singleSheets = parsed.sheets.filter((s) => s.rows.length === 1);
   const multiSheets = parsed.sheets.filter((s) => s.rows.length >= 2);
+  const smallMultiSheets = multiSheets.filter((s) => s.rows.length < LARGE_TABLE_THRESHOLD);
+  const largeMultiSheets = multiSheets.filter((s) => s.rows.length >= LARGE_TABLE_THRESHOLD);
+
+  // フローズンペイン設定を記録（シート番号 → ySplit行数）
+  const frozenPanes = new Map();
+  let sheetIndex = 0;
 
   // シート1: 概要（3列: 日本語名 / 技術名 / 値）
   if (singleSheets.length > 0) {
@@ -185,51 +307,81 @@ function generateXlsxBuffer(parsed) {
 
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws["!cols"] = [{ wch: 28 }, { wch: 28 }, { wch: 55 }];
-    XLSX.utils.book_append_sheet(wb, ws, "概要");
-  }
-
-  // シート2: 明細（セクション見出しセル結合 + 2行ヘッダー）
-  if (multiSheets.length > 0) {
-    const aoa = [];
-    const merges = [];
-    for (let si = 0; si < multiSheets.length; si++) {
-      const sheet = multiSheets[si];
-      if (si > 0) aoa.push([]);
-      const displayHeaders = getDisplayHeaders(sheet);
-      const totalCols = 1 + displayHeaders.length;
-
-      // セクションヘッダー（セル結合）
-      const sectionRowIdx = aoa.length;
-      const sectionJa = translateSectionShort(sheet.name);
-      const sectionLabel = sectionJa !== sheet.name
-        ? `■ ${sectionJa} / ${sheet.name} (${sheet.rows.length}件)`
-        : `■ ${sheet.name} (${sheet.rows.length}件)`;
-      aoa.push([sectionLabel, ...Array(displayHeaders.length).fill("")]);
-      if (totalCols > 1) {
-        merges.push({ s: { r: sectionRowIdx, c: 0 }, e: { r: sectionRowIdx, c: totalCols - 1 } });
-      }
-
-      // 列ヘッダー1行目: 日本語名
-      aoa.push(["#", ...displayHeaders.map(translateFieldShort)]);
-
-      // 列ヘッダー2行目: 技術名
-      aoa.push(["", ...displayHeaders.map(stripFieldPrefix)]);
-
-      // データ行
-      for (let ri = 0; ri < sheet.rows.length; ri++) {
-        const row = sheet.rows[ri];
-        aoa.push([String(ri + 1), ...displayHeaders.map((h) => row[h] ?? "")]);
+    const rowHeights = [];
+    for (let r = 0; r < aoa.length; r++) {
+      const cellA = aoa[r][0] || "";
+      if (r === 0) {
+        applyRowStyle(ws, r, 3, STYLES.overviewHeader);
+        rowHeights[r] = { hpt: 24 };
+      } else if (String(cellA).startsWith("■")) {
+        applyRowStyle(ws, r, 3, STYLES.overviewSection);
+        rowHeights[r] = { hpt: 22 };
+      } else if (String(cellA).startsWith("※")) {
+        applyCellStyle(ws, r, 0, STYLES.sourceNote);
+      } else if (String(cellA).startsWith("  ")) {
+        applyCellStyle(ws, r, 0, STYLES.overviewFieldJa);
+        applyCellStyle(ws, r, 1, STYLES.overviewFieldTech);
+        applyCellStyle(ws, r, 2, STYLES.overviewFieldValue);
       }
     }
-    aoa.push([]);
-    aoa.push([`※ ${TRANSLATION_SOURCE}`]);
-
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    if (merges.length > 0) ws["!merges"] = merges;
-    XLSX.utils.book_append_sheet(wb, ws, "明細");
+    ws["!rows"] = rowHeights;
+    XLSX.utils.book_append_sheet(wb, ws, "概要");
+    frozenPanes.set(sheetIndex, 1);
+    sheetIndex++;
   }
 
-  return XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
+  // シート2: 明細（小規模テーブル統合）
+  if (smallMultiSheets.length > 0) {
+    const { aoa, merges, maxCols } = buildDetailAoa(smallMultiSheets);
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    if (merges.length > 0) ws["!merges"] = merges;
+    applyDetailStylesToWs(ws, aoa, maxCols);
+    XLSX.utils.book_append_sheet(wb, ws, "明細");
+    sheetIndex++;
+  }
+
+  // 個別シート: 大規模テーブル（閾値以上）
+  const usedSheetNames = new Set(["概要", "明細"]);
+  for (const sheet of largeMultiSheets) {
+    const { aoa, merges, maxCols } = buildDetailAoa([sheet]);
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    if (merges.length > 0) ws["!merges"] = merges;
+    const displayHeaders = getDisplayHeaders(sheet);
+    const colWidths = [{ wch: 5 }];
+    for (let i = 0; i < displayHeaders.length; i++) colWidths.push({ wch: 22 });
+    ws["!cols"] = colWidths;
+    applyDetailStylesToWs(ws, aoa, maxCols);
+    const sheetName = makeUniqueSheetName(sheet.name, usedSheetNames);
+    usedSheetNames.add(sheetName);
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    frozenPanes.set(sheetIndex, 3);
+    sheetIndex++;
+  }
+
+  const rawBuf = XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
+
+  // JSZipでフローズンペインを後処理で注入
+  if (frozenPanes.size > 0) {
+    const zip = await JSZip.loadAsync(rawBuf);
+    for (const [idx, ySplit] of frozenPanes) {
+      const sheetPath = `xl/worksheets/sheet${idx + 1}.xml`;
+      const xml = await zip.file(sheetPath)?.async("string");
+      if (xml) {
+        const topLeftCell = `A${ySplit + 1}`;
+        const paneXml =
+          `<pane ySplit="${ySplit}" topLeftCell="${topLeftCell}" activePane="bottomLeft" state="frozen"/>` +
+          `<selection pane="bottomLeft" activeCell="${topLeftCell}" sqref="${topLeftCell}"/>`;
+        const patched = xml.replace(
+          /<sheetView workbookViewId="0"\/>/,
+          `<sheetView workbookViewId="0">${paneXml}</sheetView>`
+        );
+        zip.file(sheetPath, patched);
+      }
+    }
+    return await zip.generateAsync({ type: "nodebuffer" });
+  }
+
+  return rawBuf;
 }
 
 // === テスト実行 ===
@@ -246,7 +398,7 @@ const asnXml = fs.readFileSync(
   path.resolve(__dirname, "../../変換前データ/ASN_1800024221_20190214185557.xml"), "utf-8"
 );
 const asnParsed = parseXml(asnXml, "ASN_1800024221.xml");
-const asnBuffer = generateXlsxBuffer(asnParsed);
+const asnBuffer = await generateXlsxBuffer(asnParsed);
 const asnWb = XLSX.read(asnBuffer, { type: "buffer" });
 
 assert(asnWb.SheetNames.length === 2, `2シート構成 (実際: ${asnWb.SheetNames.length})`);
@@ -340,7 +492,7 @@ const obdsXml = fs.readFileSync(
   path.resolve(__dirname, "../../変換前データ/OBDS_8000580368_20180426103512.xml"), "utf-8"
 );
 const obdsParsed = parseXml(obdsXml, "OBDS_8000580368.xml");
-const obdsBuffer = generateXlsxBuffer(obdsParsed);
+const obdsBuffer = await generateXlsxBuffer(obdsParsed);
 const obdsWb = XLSX.read(obdsBuffer, { type: "buffer" });
 
 assert(obdsWb.SheetNames.length === 1, `OBDSは1シート`);
@@ -369,7 +521,7 @@ const genericXml = `<?xml version="1.0"?>
   <product><sku>DEF-456</sku><price>19.99</price></product>
 </root>`;
 const genericParsed = parseXml(genericXml, "generic.xml");
-const genericBuffer = generateXlsxBuffer(genericParsed);
+const genericBuffer = await generateXlsxBuffer(genericParsed);
 const genericWb = XLSX.read(genericBuffer, { type: "buffer" });
 
 const genericDetail = XLSX.utils.sheet_to_json(genericWb.Sheets["明細"], { header: 1 });
@@ -394,7 +546,7 @@ const attrXml = `<?xml version="1.0"?>
   <item status="inactive" type="A"><name>Item 2</name></item>
 </root>`;
 const attrParsed = parseXml(attrXml, "attr.xml");
-const attrBuffer = generateXlsxBuffer(attrParsed);
+const attrBuffer = await generateXlsxBuffer(attrParsed);
 const attrWb = XLSX.read(attrBuffer, { type: "buffer" });
 const attrDetail = XLSX.utils.sheet_to_json(attrWb.Sheets["明細"], { header: 1 });
 const attrJaHeaders = attrDetail[1];
@@ -422,13 +574,182 @@ assert(allValues.has("887749824742"), "EAN_UPC値");
 assert(allValues.has("juily@waltknit.com"), "E_MAIL値");
 assert(allValues.has("WALT TECHNOLOGY GROUP CO.,LTD."), "NAME値");
 
-// テスト6: ファイル書き出し
-console.log("\n📊 テスト6: ファイル書き出し");
+// テスト6: スタイリング検証（セル背景色 + 行高 — xlsx-js-styleの読み戻しで検証可能な項目）
+// ※ 太字・フォント色・ボーダーはXLSXファイルに正しく書き込まれるが、
+//    XLSX.read()の制約で読み戻し時に取得できないため、背景色と行高で検証する。
+//    Excelで出力ファイルを開くと全スタイルが正しく反映されていることを確認済み。
+console.log("\n📊 テスト6: セルスタイリング検証");
+const styledWb = XLSX.read(asnBuffer, { type: "buffer", cellStyles: true });
+
+// 概要シートの背景色
+const ovWs = styledWb.Sheets["概要"];
+const ovA1 = ovWs["A1"];
+assert(ovA1?.s?.fgColor?.rgb === "2F5496", "概要ヘッダーA1: ダークブルー背景(#2F5496)");
+
+const ovA2 = ovWs["A2"];
+assert(ovA2?.s?.fgColor?.rgb === "D6E4F0", "概要セクション行: ライトブルー背景(#D6E4F0)");
+
+// 行高の設定
+assert(ovWs["!rows"]?.[0]?.hpt === 24, "概要ヘッダー行高=24pt");
+assert(ovWs["!rows"]?.[1]?.hpt === 22, "概要セクション行高=22pt");
+
+// 明細シートの背景色
+const dtWs = styledWb.Sheets["明細"];
+const dtA1 = dtWs["A1"];
+assert(dtA1?.s?.fgColor?.rgb === "2F5496", "明細セクション見出し: ダークブルー背景(#2F5496)");
+
+const dtA2 = dtWs["A2"];
+assert(dtA2?.s?.fgColor?.rgb === "4472C4", "明細日本語ヘッダー行: ミディアムブルー背景(#4472C4)");
+
+const dtA3 = dtWs["A3"];
+assert(dtA3?.s?.fgColor?.rgb === "F2F2F2", "明細技術名行: ライトグレー背景(#F2F2F2)");
+
+// 明細行高
+assert(dtWs["!rows"]?.[0]?.hpt === 24, "明細セクション行高=24pt");
+assert(dtWs["!rows"]?.[1]?.hpt === 20, "明細日本語ヘッダー行高=20pt");
+
+// テスト7: シート分割（閾値テスト: 大規模テーブルが独立シートに分離）
+console.log("\n📊 テスト7: シート分割 — 30行以上のテーブルが独立シートに分離");
+
+// 35行のテーブル（閾値超過）+ 5行のテーブル（閾値未満）+ 1行セクション
+function generateLargeXml(largeRowCount, smallRowCount) {
+  let xml = `<?xml version="1.0"?>\n<root>\n  <header><title>Test</title><version>1.0</version></header>\n`;
+  for (let i = 0; i < largeRowCount; i++) {
+    xml += `  <E1BPEXTC><FIELD1>VAL_${i + 1}</FIELD1><FIELD2>DATA_${i + 1}</FIELD2></E1BPEXTC>\n`;
+  }
+  for (let i = 0; i < smallRowCount; i++) {
+    xml += `  <E1BPIBDLVITEM><ITM_NUMBER>${String(i + 1).padStart(6, "0")}</ITM_NUMBER><MATERIAL>MAT_${i + 1}</MATERIAL></E1BPIBDLVITEM>\n`;
+  }
+  xml += `</root>`;
+  return xml;
+}
+
+// 7a: 35行テーブル → 独立シート、5行テーブル → 明細に統合
+const splitXml = generateLargeXml(35, 5);
+const splitParsed = parseXml(splitXml, "split_test.xml");
+const splitBuffer = await generateXlsxBuffer(splitParsed);
+const splitWb = XLSX.read(splitBuffer, { type: "buffer", cellStyles: true });
+
+assert(splitWb.SheetNames.length === 3, `3シート構成: 概要+明細+個別 (実際: ${splitWb.SheetNames.length})`);
+assert(splitWb.SheetNames[0] === "概要", "シート1=概要");
+assert(splitWb.SheetNames[1] === "明細", "シート2=明細（小規模テーブル）");
+assert(splitWb.SheetNames[2] === "拡張データ", "シート3=拡張データ（日本語名で独立シート）");
+
+// 明細シートには5行テーブルのみ
+const splitDetail = XLSX.utils.sheet_to_json(splitWb.Sheets["明細"], { header: 1 });
+const splitDetailText = splitDetail.map(r => String(r[0] || "")).join("\n");
+assert(splitDetailText.includes("配送明細 / E1BPIBDLVITEM"), "明細に小規模テーブル(配送明細)あり");
+assert(!splitDetailText.includes("拡張データ / E1BPEXTC"), "明細に大規模テーブル(拡張データ)なし");
+
+// 独立シートに35行テーブル
+const extSheet = splitWb.Sheets["拡張データ"];
+const extData = XLSX.utils.sheet_to_json(extSheet, { header: 1 });
+assert(String(extData[0][0]).includes("拡張データ / E1BPEXTC"), "独立シートにセクション見出しあり");
+assert(extData[1][0] === "#", "独立シートに日本語ヘッダーあり");
+
+// データ行数の検証（セクション1行 + ヘッダー2行 + 35データ行 + 空行 + 出典 = 40行）
+const extDataRows = extData.filter(r => String(r[0] || "").match(/^\d+$/));
+assert(extDataRows.length === 35, `独立シートに35データ行 (実際: ${extDataRows.length})`);
+assert(String(extDataRows[0][1]) === "VAL_1", "独立シート1行目のデータ正しい");
+assert(String(extDataRows[34][1]) === "VAL_35", "独立シート35行目のデータ正しい");
+
+// フローズンペイン: JSZipで実際のXMLを検証
+assert(extSheet["!cols"] && extSheet["!cols"].length > 0, "独立シートに列幅設定あり");
+{
+  const splitZip = await JSZip.loadAsync(splitBuffer);
+  // 概要シート(sheet1): ySplit=1
+  const sheet1Xml = await splitZip.file("xl/worksheets/sheet1.xml")?.async("string");
+  assert(sheet1Xml?.includes('ySplit="1"') && sheet1Xml?.includes('state="frozen"'), "概要シートにフローズンペイン(ySplit=1)あり");
+  // 独立シート(sheet3): ySplit=3
+  const sheet3Xml = await splitZip.file("xl/worksheets/sheet3.xml")?.async("string");
+  assert(sheet3Xml?.includes('ySplit="3"') && sheet3Xml?.includes('state="frozen"'), "独立シートにフローズンペイン(ySplit=3)あり");
+}
+
+// 7b: 29行テーブル（閾値未満）→ 全て明細に統合
+const noSplitXml = generateLargeXml(29, 5);
+const noSplitParsed = parseXml(noSplitXml, "no_split_test.xml");
+const noSplitBuffer = await generateXlsxBuffer(noSplitParsed);
+const noSplitWb = XLSX.read(noSplitBuffer, { type: "buffer" });
+
+assert(noSplitWb.SheetNames.length === 2, `29行テーブルは分割なし: 2シート (実際: ${noSplitWb.SheetNames.length})`);
+assert(noSplitWb.SheetNames[1] === "明細", "29行テーブルは明細に統合");
+
+// 7c: 複数の大規模テーブル → それぞれ独立シート
+function generateMultiLargeXml() {
+  let xml = `<?xml version="1.0"?>\n<root>\n  <header><title>Multi</title></header>\n`;
+  for (let i = 0; i < 40; i++) {
+    xml += `  <E1BPEXTC><FIELD1>EXT_${i}</FIELD1></E1BPEXTC>\n`;
+  }
+  for (let i = 0; i < 50; i++) {
+    xml += `  <E1BPIBDLVITEM><ITM_NUMBER>${i}</ITM_NUMBER></E1BPIBDLVITEM>\n`;
+  }
+  for (let i = 0; i < 3; i++) {
+    xml += `  <E1BPDLVDEADLN><TIMETYPE>TYPE_${i}</TIMETYPE></E1BPDLVDEADLN>\n`;
+  }
+  xml += `</root>`;
+  return xml;
+}
+const multiLargeXml = generateMultiLargeXml();
+const multiLargeParsed = parseXml(multiLargeXml, "multi_large.xml");
+const multiLargeBuffer = await generateXlsxBuffer(multiLargeParsed);
+const multiLargeWb = XLSX.read(multiLargeBuffer, { type: "buffer" });
+
+// 概要(header 1行) + 明細(3行テーブル) + 拡張データ(40行) + 配送明細(50行) = 4シート
+assert(multiLargeWb.SheetNames.length === 4, `複数大規模テーブル: 4シート (実際: ${multiLargeWb.SheetNames.length})`);
+assert(multiLargeWb.SheetNames.includes("拡張データ"), "拡張データが独立シート");
+assert(multiLargeWb.SheetNames.includes("配送明細"), "配送明細が独立シート");
+assert(multiLargeWb.SheetNames.includes("明細"), "小規模テーブルは明細に統合");
+
+// 7d: 全テーブルが大規模 → 明細シートなし
+function generateAllLargeXml() {
+  let xml = `<?xml version="1.0"?>\n<root>\n  <header><title>AllLarge</title></header>\n`;
+  for (let i = 0; i < 30; i++) {
+    xml += `  <E1BPEXTC><FIELD1>F_${i}</FIELD1></E1BPEXTC>\n`;
+  }
+  for (let i = 0; i < 30; i++) {
+    xml += `  <E1BPIBDLVITEM><ITM_NUMBER>${i}</ITM_NUMBER></E1BPIBDLVITEM>\n`;
+  }
+  xml += `</root>`;
+  return xml;
+}
+const allLargeXml = generateAllLargeXml();
+const allLargeParsed = parseXml(allLargeXml, "all_large.xml");
+const allLargeBuffer = await generateXlsxBuffer(allLargeParsed);
+const allLargeWb = XLSX.read(allLargeBuffer, { type: "buffer" });
+
+assert(allLargeWb.SheetNames.length === 3, `全て大規模テーブル: 3シート=概要+個別2 (実際: ${allLargeWb.SheetNames.length})`);
+assert(!allLargeWb.SheetNames.includes("明細"), "全て大規模の場合、明細シートなし");
+assert(allLargeWb.SheetNames.includes("拡張データ"), "拡張データが独立シート");
+assert(allLargeWb.SheetNames.includes("配送明細"), "配送明細が独立シート");
+
+// 7e: 翻訳なしの大規模テーブル → 技術名がシート名
+function generateGenericLargeXml() {
+  let xml = `<?xml version="1.0"?>\n<root>\n`;
+  for (let i = 0; i < 35; i++) {
+    xml += `  <bigdata><col1>v${i}</col1><col2>d${i}</col2></bigdata>\n`;
+  }
+  xml += `</root>`;
+  return xml;
+}
+const genericLargeXml = generateGenericLargeXml();
+const genericLargeParsed = parseXml(genericLargeXml, "generic_large.xml");
+const genericLargeBuffer = await generateXlsxBuffer(genericLargeParsed);
+const genericLargeWb = XLSX.read(genericLargeBuffer, { type: "buffer" });
+
+assert(genericLargeWb.SheetNames.includes("bigdata"), "翻訳なし大規模テーブルは技術名がシート名");
+const bigdataRows = XLSX.utils.sheet_to_json(genericLargeWb.Sheets["bigdata"], { header: 1 })
+  .filter(r => String(r[0] || "").match(/^\d+$/));
+assert(bigdataRows.length === 35, `翻訳なし大規模テーブル: 35データ行 (実際: ${bigdataRows.length})`);
+
+// テスト8: ファイル書き出し
+console.log("\n📊 テスト8: ファイル書き出し");
 const outputDir = path.resolve(__dirname, "output");
 if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-fs.writeFileSync(path.join(outputDir, "ASN_bilingual.xlsx"), asnBuffer);
-fs.writeFileSync(path.join(outputDir, "OBDS_bilingual.xlsx"), obdsBuffer);
-assert(true, "XLSXファイル出力済み");
+fs.writeFileSync(path.join(outputDir, "ASN_styled.xlsx"), asnBuffer);
+fs.writeFileSync(path.join(outputDir, "OBDS_styled.xlsx"), obdsBuffer);
+fs.writeFileSync(path.join(outputDir, "SPLIT_test.xlsx"), splitBuffer);
+fs.writeFileSync(path.join(outputDir, "MULTI_LARGE_test.xlsx"), multiLargeBuffer);
+assert(true, "スタイル付きXLSXファイル出力済み（通常+分割テスト）");
 
 // 結果
 console.log(`\n${"=".repeat(50)}`);

@@ -63,11 +63,11 @@ export default function Home() {
   }, []);
 
   const handleDownload = useCallback(
-    (id: string) => {
+    async (id: string) => {
       const fileEntry = files.find((f) => f.id === id);
       if (!fileEntry?.result) return;
 
-      const blob = generateXlsx(fileEntry.result);
+      const blob = await generateXlsx(fileEntry.result);
       const xlsxName = changeExtension(fileEntry.file.name, "xlsx");
       saveAs(blob, xlsxName);
     },
@@ -79,14 +79,14 @@ export default function Home() {
     if (doneFiles.length === 0) return;
 
     if (doneFiles.length === 1) {
-      handleDownload(doneFiles[0].id);
+      await handleDownload(doneFiles[0].id);
       return;
     }
 
     const zip = new JSZip();
     for (const f of doneFiles) {
       if (!f.result) continue;
-      const blob = generateXlsx(f.result);
+      const blob = await generateXlsx(f.result);
       const xlsxName = changeExtension(f.file.name, "xlsx");
       const safeName = xlsxName.replace(/[<>:"/\\|?*]/g, "_");
       zip.file(safeName, blob);

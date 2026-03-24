@@ -2,7 +2,11 @@
 
 import { useState } from "react";
 import type { ParsedXmlResult, SheetData } from "@/lib/types";
-import { getXlsxSummary, getDisplayHeaders } from "@/lib/xlsx-generator";
+import {
+  getXlsxSummary,
+  getDisplayHeaders,
+  LARGE_TABLE_THRESHOLD,
+} from "@/lib/xlsx-generator";
 import {
   translateSection,
   translateFieldShort,
@@ -42,10 +46,14 @@ export default function ConversionResult({ result }: ConversionResultProps) {
     });
   }
   if (multiSheets.length > 0) {
+    const totalMultiRows = multiSheets.reduce((acc, s) => acc + s.rows.length, 0);
+    const detailDesc = summary.separateSheets.length > 0
+      ? `${multiSheets.length}テーブル・${totalMultiRows}行（うち${summary.separateSheets.length}テーブルは個別シート）`
+      : `${multiSheets.length}テーブル・${totalMultiRows}行`;
     tabs.push({
       key: "details",
       label: "明細",
-      desc: `${multiSheets.length}テーブル・${summary.detailRows}行`,
+      desc: detailDesc,
     });
   }
 
@@ -66,6 +74,8 @@ export default function ConversionResult({ result }: ConversionResultProps) {
             ` / 概要 ${summary.overviewSections}セクション`}
           {summary.detailSections > 0 &&
             ` / 明細 ${summary.detailSections}テーブル (${summary.detailRows}行)`}
+          {summary.separateSheets.length > 0 &&
+            ` / 個別シート ${summary.separateSheets.map((s) => `${s.jaName} (${s.rows}行)`).join(", ")}`}
         </span>
         {coverage.isSapDetected ? (
           <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2.5 py-0.5 text-blue-600 border border-blue-200">
@@ -209,6 +219,7 @@ function DetailsView({ sheets }: { sheets: SheetData[] }) {
     <div className="space-y-4 p-4">
       {sheets.map((sheet, si) => {
         const displayHeaders = getDisplayHeaders(sheet);
+        const isSeparateSheet = sheet.rows.length >= LARGE_TABLE_THRESHOLD;
         return (
           <div key={si}>
             <h4 className="mb-2 text-xs font-bold text-blue-700 tracking-wider">
@@ -216,6 +227,14 @@ function DetailsView({ sheets }: { sheets: SheetData[] }) {
               <span className="text-gray-400 font-normal">
                 ({sheet.rows.length}件)
               </span>
+              {isSeparateSheet && (
+                <span className="ml-2 inline-flex items-center gap-0.5 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 border border-amber-200">
+                  <svg className="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                  </svg>
+                  個別シート出力
+                </span>
+              )}
             </h4>
             <div className="overflow-x-auto rounded-lg border border-gray-200">
               <table className="min-w-full divide-y divide-gray-200 text-sm">
